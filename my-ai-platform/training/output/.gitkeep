@@ -1,0 +1,6 @@
+# 학습 로그 및 체크포인트
+
+output/
+├── checkpoint-100/
+├── checkpoint-200/
+└── training_log.txt

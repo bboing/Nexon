@@ -1,0 +1,438 @@
+# AI Platform - 통합 구성 (LangChain + Langfuse 셀프호스팅)
+# PostgreSQL (RDB) + Milvus (Vector DB) + Clickhouse (OLAP) + Redis + MinIO
+
+services:
+  # ============================================================
+  # Layer 1: Core Infrastructure (절대 죽으면 안 됨)
+  # ============================================================
+  
+  # PostgreSQL - 비즈니스 DB (LangChain, Milvus용)
+  biz-postgres:
+    image: postgres:16-alpine
+    container_name: ai-biz-postgres
+    environment:
+      - POSTGRES_DB=${BIZ_POSTGRES_DB:-aiplatform}
+      - POSTGRES_USER=${BIZ_POSTGRES_USER:-admin}
+      - POSTGRES_PASSWORD=${BIZ_POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "${BIZ_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - biz-postgres-data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${BIZ_POSTGRES_USER:-admin}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # PostgreSQL - Ops DB (Langfuse 로그용, 분리하여 격리)
+  ops-postgres:
+    image: postgres:16-alpine
+    container_name: ai-ops-postgres
+    environment:
+      - POSTGRES_DB=${OPS_POSTGRES_DB:-langfuse}
+      - POSTGRES_USER=${OPS_POSTGRES_USER:-langfuse}
+      - POSTGRES_PASSWORD=${OPS_POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_INITDB_ARGS=--encoding=UTF-8 --lc-collate=C --lc-ctype=C
+      - TZ=UTC
+      - PGTZ=UTC
+    ports:
+      - "${OPS_POSTGRES_PORT:-5433}:5432"  # 5433 포트로 분리
+    volumes:
+      - ops-postgres-data:/var/lib/postgresql/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${OPS_POSTGRES_USER:-langfuse}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # Redis - 공유 캐시/큐
+  redis:
+    image: redis:7-alpine
+    container_name: ai-redis
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    command: >
+      redis-server 
+      --appendonly yes 
+      --requirepass ${REDIS_PASSWORD:-changeme}
+      --maxmemory-policy noeviction
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 10s
+      retries: 10
+
+  # Clickhouse - Langfuse OLAP 데이터베이스
+  clickhouse:
+    image: clickhouse/clickhouse-server:latest
+    container_name: ai-clickhouse
+    user: "101:101"
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - clickhouse-logs:/var/log/clickhouse-server
+    ports:
+      - "127.0.0.1:8123:8123"  # HTTP
+      - "127.0.0.1:19000:9000"  # Native
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: wget --no-verbose --tries=1 --spider http://localhost:8123/ping || exit 1
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 1s
+
+  # etcd - Milvus 메타데이터 저장소
+  etcd:
+    image: quay.io/coreos/etcd:v3.5.5
+    container_name: ai-etcd
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd-data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO - Milvus 전용 (벡터 저장)
+  minio-milvus:
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    container_name: ai-minio-milvus
+    environment:
+      MINIO_ROOT_USER: ${MINIO_MILVUS_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_MILVUS_PASSWORD:-minioadmin}
+    ports:
+      - "${MINIO_MILVUS_API_PORT:-9000}:9000"
+      - "${MINIO_MILVUS_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-milvus-data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # MinIO - Langfuse 전용 (이벤트/미디어 저장)
+  minio-langfuse:
+    image: cgr.dev/chainguard/minio:latest
+    container_name: ai-minio-langfuse
+    entrypoint: sh
+    command: -c 'mkdir -p /data/langfuse && minio server --address ":9000" --console-address ":9001" /data'
+    environment:
+      MINIO_ROOT_USER: ${MINIO_LANGFUSE_USER:-langfuse}
+      MINIO_ROOT_PASSWORD: ${MINIO_LANGFUSE_PASSWORD:-langfusesecret}
+    ports:
+      - "${MINIO_LANGFUSE_API_PORT:-9090}:9000"
+      - "127.0.0.1:9093:9001"
+    volumes:
+      - minio-langfuse-data:/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 1s
+      timeout: 5s
+      retries: 5
+      start_period: 1s
+
+  # ============================================================
+  # Layer 2: Ops/Platform (모니터링/관찰성)
+  # ============================================================
+
+  # Milvus - 벡터 데이터베이스 (biz-postgres 사용)
+  milvus:
+    image: milvusdb/milvus:v2.3.3
+    container_name: ai-milvus
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio-milvus:9000
+      MINIO_ACCESS_KEY_ID: ${MINIO_MILVUS_USER:-minioadmin}
+      MINIO_SECRET_ACCESS_KEY: ${MINIO_MILVUS_PASSWORD:-minioadmin}
+    ports:
+      - "${MILVUS_PORT:-19530}:19530"
+      - "${MILVUS_METRIC_PORT:-9092}:9091"  # 9091 → 9092 (충돌 방지)
+    volumes:
+      - milvus-data:/var/lib/milvus
+    command: ["milvus", "run", "standalone"]
+    depends_on:
+      etcd:
+        condition: service_healthy
+      minio-milvus:
+        condition: service_healthy
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s
+      timeout: 20s
+      retries: 3
+
+  # Attu - Milvus 관리 UI
+  attu:
+    image: zilliz/attu:v2.3.3
+    container_name: ai-attu
+    environment:
+      - MILVUS_URL=milvus:19530
+    ports:
+      - "${ATTU_PORT:-8080}:3000"
+    depends_on:
+      - milvus
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # ============================================================
+  # Layer 3: 애플리케이션 (모든 인프라에 의존)
+  # ============================================================
+
+  # LangChain API - FastAPI 애플리케이션 (비즈니스 로직)
+  langchain-api:
+    build:
+      context: ./langchain_app
+      dockerfile: Dockerfile
+    container_name: ai-langchain-api
+    environment:
+      # Ollama 연결 (로컬 macOS에서 실행)
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      
+      # PostgreSQL 연결 (biz-postgres 사용)
+      - POSTGRES_HOST=biz-postgres
+      - POSTGRES_PORT=5432
+      - POSTGRES_DB=${BIZ_POSTGRES_DB:-aiplatform}
+      - POSTGRES_USER=${BIZ_POSTGRES_USER:-admin}
+      - POSTGRES_PASSWORD=${BIZ_POSTGRES_PASSWORD:-changeme}
+      
+      # Milvus 연결
+      - MILVUS_HOST=milvus
+      - MILVUS_PORT=19530
+      
+      # Redis 연결
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-changeme}
+      
+      # Langfuse 연동 (셀프호스팅)
+      - LANGFUSE_PUBLIC_KEY=${LANGFUSE_PUBLIC_KEY:-}
+      - LANGFUSE_SECRET_KEY=${LANGFUSE_SECRET_KEY:-}
+      - LANGFUSE_HOST=http://langfuse-web:3000
+      - LANGFUSE_ENABLED=true
+      
+      # API 설정
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_WORKERS=4
+      - LOG_LEVEL=info
+    ports:
+      - "${LANGCHAIN_API_PORT:-8000}:8000"
+    volumes:
+      - ./langchain_app:/app
+      - langchain-cache:/root/.cache
+    depends_on:
+      biz-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      milvus:
+        condition: service_healthy
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Langfuse Worker - 백그라운드 작업 처리 (ops-postgres 사용)
+  langfuse-worker:
+    image: langfuse/langfuse-worker:3
+    container_name: ai-langfuse-worker
+    environment:
+      # 기본 설정
+      NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3000}
+      SALT: ${LANGFUSE_SALT:-changeme-salt-32chars-minimum}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_EXPERIMENTAL:-false}
+      
+      # PostgreSQL 연결 (ops-postgres 사용 - 로그 격리!)
+      DATABASE_URL: postgresql://${OPS_POSTGRES_USER:-langfuse}:${OPS_POSTGRES_PASSWORD:-changeme}@ops-postgres:5432/${OPS_POSTGRES_DB:-langfuse}
+      
+      # Clickhouse 연결
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: false
+      
+      # MinIO (Langfuse) 연결
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_LANGFUSE_USER:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_LANGFUSE_PASSWORD:-langfusesecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio-langfuse:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_LANGFUSE_USER:-langfuse}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_LANGFUSE_PASSWORD:-langfusesecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      
+      # Redis 연결
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${REDIS_PASSWORD:-changeme}
+      REDIS_TLS_ENABLED: false
+    ports:
+      - "127.0.0.1:3030:3030"
+    depends_on:
+      ops-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-langfuse:
+        condition: service_healthy
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+  # Langfuse Web - UI 및 API (ops-postgres 사용)
+  langfuse-web:
+    image: langfuse/langfuse:3
+    container_name: ai-langfuse-web
+    environment:
+      # 기본 설정
+      NEXTAUTH_URL: ${LANGFUSE_URL:-http://localhost:3000}
+      NEXTAUTH_SECRET: ${LANGFUSE_NEXTAUTH_SECRET:-changeme-secret-32chars-minimum}
+      SALT: ${LANGFUSE_SALT:-changeme-salt-32chars-minimum}
+      ENCRYPTION_KEY: ${LANGFUSE_ENCRYPTION_KEY:-0000000000000000000000000000000000000000000000000000000000000000}
+      TELEMETRY_ENABLED: ${LANGFUSE_TELEMETRY:-true}
+      LANGFUSE_ENABLE_EXPERIMENTAL_FEATURES: ${LANGFUSE_EXPERIMENTAL:-false}
+      
+      # PostgreSQL 연결 (ops-postgres 사용 - 로그 격리!)
+      DATABASE_URL: postgresql://${OPS_POSTGRES_USER:-langfuse}:${OPS_POSTGRES_PASSWORD:-changeme}@ops-postgres:5432/${OPS_POSTGRES_DB:-langfuse}
+      
+      # Clickhouse 연결
+      CLICKHOUSE_MIGRATION_URL: clickhouse://clickhouse:9000
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-clickhouse}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-clickhouse}
+      CLICKHOUSE_CLUSTER_ENABLED: false
+      
+      # MinIO (Langfuse) 연결
+      LANGFUSE_S3_EVENT_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_EVENT_UPLOAD_REGION: auto
+      LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${MINIO_LANGFUSE_USER:-langfuse}
+      LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_LANGFUSE_PASSWORD:-langfusesecret}
+      LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: http://minio-langfuse:9000
+      LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_EVENT_UPLOAD_PREFIX: events/
+      
+      LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: langfuse
+      LANGFUSE_S3_MEDIA_UPLOAD_REGION: auto
+      LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${MINIO_LANGFUSE_USER:-langfuse}
+      LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${MINIO_LANGFUSE_PASSWORD:-langfusesecret}
+      LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: http://localhost:9000
+      LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: true
+      LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: media/
+      
+      # Redis 연결
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_AUTH: ${REDIS_PASSWORD:-changeme}
+      REDIS_TLS_ENABLED: false
+      
+      # 초기 설정 (선택사항)
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_PROJECT:-ai-platform}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_SECRET_KEY:-}
+    ports:
+      - "${LANGFUSE_PORT:-3000}:3000"
+    depends_on:
+      ops-postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      minio-langfuse:
+        condition: service_healthy
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:3000/api/public/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+networks:
+  ai-network:
+    driver: bridge
+
+volumes:
+  # Layer 1: Core Infrastructure 볼륨
+  biz-postgres-data:
+    driver: local
+  ops-postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  clickhouse-data:
+    driver: local
+  clickhouse-logs:
+    driver: local
+  etcd-data:
+    driver: local
+  minio-milvus-data:
+    driver: local
+  minio-langfuse-data:
+    driver: local
+  
+  # Layer 2/3: Application 볼륨
+  milvus-data:
+    driver: local
+  langchain-cache:
+    driver: local

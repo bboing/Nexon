@@ -1,0 +1,39 @@
+# ============================================
+# Open WebUI 추가 설정
+# ============================================
+# Ollama를 위한 웹 채팅 인터페이스
+# 
+# 사용법:
+#   cp docker-compose.webui.yml docker-compose.override.yml
+#   docker-compose up -d
+#
+# 또는:
+#   docker-compose -f docker-compose.yml -f docker-compose.webui.yml up -d
+# ============================================
+
+services:
+  # Open WebUI - Ollama 웹 인터페이스
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:${OPENWEBUI_VERSION:-latest}
+    container_name: ai-open-webui
+    ports:
+      - "${OPENWEBUI_PORT:-8090}:8080"
+    environment:
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - WEBUI_AUTH=${WEBUI_AUTH:-true}
+      - WEBUI_NAME=AI Platform
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-changeme-secret-key}
+    volumes:
+      - open-webui-data:/app/backend/data
+    networks:
+      - ai-network
+    restart: unless-stopped
+
+volumes:
+  open-webui-data:
+
+networks:
+  ai-network:
+    external: true
+    name: ai-network
+

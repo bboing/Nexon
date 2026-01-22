@@ -1,0 +1,2 @@
+.env filter=git-crypt diff=git-crypt
+my-ai-platform/.env filter=git-crypt diff=git-crypt

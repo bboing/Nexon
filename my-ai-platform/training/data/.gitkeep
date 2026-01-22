@@ -1,0 +1,13 @@
+# 학습 데이터셋을 이 디렉토리에 넣으세요
+
+## 지원 형식
+- JSON (.json)
+- CSV (.csv)
+- TXT (.txt)
+- JSONL (.jsonl)
+
+## 예시
+data/
+├── game_npc_dialogues.json
+├── quest_conversations.json
+└── item_descriptions.csv

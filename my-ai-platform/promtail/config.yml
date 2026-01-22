@@ -1,0 +1,93 @@
+# Promtail 로그 수집 설정
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  # 시스템 로그 수집
+  - job_name: system
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: varlogs
+          __path__: /var/log/*log
+
+  # Docker 컨테이너 로그 수집
+  - job_name: containers
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: containerlogs
+          __path__: /var/lib/docker/containers/*/*log
+
+    pipeline_stages:
+      # Docker JSON 로그 파싱
+      - json:
+          expressions:
+            output: log
+            stream: stream
+            attrs:
+      - json:
+          expressions:
+            tag:
+          source: attrs
+      - regex:
+          expression: (?P<container_name>(?:[^|]*[^|]))
+          source: tag
+      - timestamp:
+          source: time
+          format: RFC3339Nano
+      - labels:
+          stream:
+          container_name:
+      - output:
+          source: output
+
+  # n8n 애플리케이션 로그
+  - job_name: n8n
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: n8n
+          app: n8n
+          __path__: /var/lib/docker/containers/*n8n*/*log
+
+  # Ollama 애플리케이션 로그
+  - job_name: ollama
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: ollama
+          app: ollama
+          __path__: /var/lib/docker/containers/*ollama*/*log
+
+  # Nginx 액세스 로그
+  - job_name: nginx-access
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          type: access
+          __path__: /var/log/nginx/*access.log
+
+  # Nginx 에러 로그
+  - job_name: nginx-error
+    static_configs:
+      - targets:
+          - localhost
+        labels:
+          job: nginx
+          type: error
+          __path__: /var/log/nginx/*error.log
+
