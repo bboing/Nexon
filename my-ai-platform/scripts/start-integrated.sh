@@ -122,14 +122,6 @@ else
     echo "❌ 응답 없음 (초기화 중...)"
 fi
 
-# Attu
-echo -n "  Attu:           "
-if curl -s http://localhost:8080 > /dev/null 2>&1; then
-    echo "✅ http://localhost:8080"
-else
-    echo "❌ 응답 없음"
-fi
-
 echo ""
 echo "🎉 AI Platform 통합 스택 시작 완료!"
 echo ""
@@ -137,10 +129,11 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo "📍 주요 서비스 접속:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo "  🤖 LangChain API:     http://localhost:8000/docs"
-echo "  🪢 Langfuse (추적):   http://localhost:3000 ⭐"
-echo "  🗄️  Attu (Milvus UI): http://localhost:8080"
+echo "  💬 Open WebUI:        http://localhost:8090 ⭐"
+echo "  🪢 Langfuse (추적):   http://localhost:3000"
+echo "  🌐 Neo4j Browser:     http://localhost:7474"
 echo "  📦 MinIO (Milvus):    http://localhost:9001"
-echo "  📦 MinIO (Langfuse):  http://localhost:9090"
+echo "  📦 MinIO (Langfuse):  http://localhost:9093"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo ""
 echo "⚠️  중요: Langfuse 초기 설정"
@@ -150,11 +143,11 @@ echo "  2. Settings → API Keys에서 Public/Secret Key 생성"
 echo "  3. .env 파일에 LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY 추가"
 echo "  4. docker compose -f docker-compose.integrated.yml restart langchain-api"
 echo ""
-echo "📖 빠른 테스트:"
+echo "📖 NPC 대화 테스트:"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo '  curl -X POST http://localhost:8000/api/chat/ \'
+echo '  curl -X POST http://localhost:8000/api/npc/chat \'
 echo '    -H "Content-Type: application/json" \'
-echo '    -d '"'"'{"message": "안녕하세요!"}'"'"
+echo '    -d '"'"'{"npc_name": "밍밍부인", "message": "안녕하세요!"}'"'"
 echo ""
 echo "📝 로그 확인:"
 echo "  docker compose -f docker-compose.integrated.yml logs -f"

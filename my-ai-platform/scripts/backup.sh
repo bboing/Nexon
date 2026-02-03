@@ -15,23 +15,21 @@ echo "======================================"
 
 # 백업할 디렉토리 목록
 echo "📦 백업 중:"
-echo "  - n8n 워크플로우 데이터"
 echo "  - Ollama 모델 파일"
 echo "  - 설정 파일"
+echo "  - 학습 데이터"
 echo ""
 
 # 백업 생성
 tar -czf "$BACKUP_FILE" \
     --exclude='node_modules' \
     --exclude='.git' \
-    n8n/data/ \
+    --exclude='training/llama.cpp/build' \
     ollama/models/ \
+    training/data/input_data/ \
     .env.example \
-    docker-compose.yml \
-    nginx/ \
-    prometheus/ \
-    promtail/ \
-    loki/ \
+    env.integrated.example \
+    docker-compose.integrated.yml \
     2>/dev/null
 
 BACKUP_SIZE=$(du -sh "$BACKUP_FILE" | cut -f1)

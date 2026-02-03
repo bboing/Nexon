@@ -47,8 +47,6 @@ mlx-env/
 # Docker 볼륨 데이터
 my-ai-platform/ollama/models/*
 !my-ai-platform/ollama/models/.gitkeep
-my-ai-platform/n8n/data/*
-!my-ai-platform/n8n/data/.gitkeep
 my-ai-platform/postgres/data/
 my-ai-platform/milvus/
 my-ai-platform/redis/data/
@@ -93,8 +91,6 @@ my-ai-platform/langfuse/
 logs/
 *.out
 *.err
-my-ai-platform/n8n/data/*.log
-my-ai-platform/n8n/data/*.journal
 
 # ============ Database ============
 *.sqlite
@@ -120,7 +116,7 @@ Thumbs.db
 .ipynb_checkpoints/
 *.ipynb
 
-# ============ Node.js (n8n) ============
+# ============ Node.js ============
 node_modules/
 npm-debug.log*
 yarn-debug.log*
@@ -143,13 +139,6 @@ temp/
 *id_rsa*
 *id_ed25519*
 
-# ============ Monitoring Data ============
-my-ai-platform/prometheus/data/
-my-ai-platform/grafana/data/
-my-ai-platform/loki/data/
-
-# ============ Git ============
-my-ai-platform/n8n/data/git/
 
 # ============ 추가 제외 (선택사항) ============
 # Hugging Face 캐시

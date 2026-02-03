@@ -1,8 +1,15 @@
 """Langfuse 콜백 핸들러 (Cloud 사용)"""
-from langfuse.callback import CallbackHandler
-from config.settings import settings
 from typing import Optional
 import logging
+
+try:
+    from langfuse.callback import CallbackHandler
+    LANGFUSE_AVAILABLE = True
+except ImportError:
+    CallbackHandler = None
+    LANGFUSE_AVAILABLE = False
+
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -21,22 +28,26 @@ class LangfuseManager:
     
     def _init_langfuse(self):
         """Langfuse Cloud 초기화"""
-        if not settings.langfuse_enabled:
+        if not LANGFUSE_AVAILABLE:
+            logger.warning("⚠️ Langfuse SDK not available. Install with: pip install langfuse")
+            return
+            
+        if not settings.LANGFUSE_ENABLED:
             logger.info("Langfuse disabled")
             return
         
-        if not settings.langfuse_public_key or not settings.langfuse_secret_key:
+        if not settings.LANGFUSE_PUBLIC_KEY or not settings.LANGFUSE_SECRET_KEY:
             logger.warning("Langfuse keys not set. Observability disabled.")
             logger.warning("Set LANGFUSE_PUBLIC_KEY and LANGFUSE_SECRET_KEY in .env")
             return
         
         try:
             self._callback_handler = CallbackHandler(
-                public_key=settings.langfuse_public_key,
-                secret_key=settings.langfuse_secret_key,
-                host=settings.langfuse_host  # cloud.langfuse.com
+                public_key=settings.LANGFUSE_PUBLIC_KEY,
+                secret_key=settings.LANGFUSE_SECRET_KEY,
+                host=settings.LANGFUSE_BASE_URL
             )
-            logger.info(f"✅ Langfuse Cloud initialized: {settings.langfuse_host}")
+            logger.info(f"✅ Langfuse Cloud initialized: {settings.LANGFUSE_BASE_URL}")
         except Exception as e:
             logger.error(f"❌ Langfuse initialization failed: {e}")
             self._callback_handler = None

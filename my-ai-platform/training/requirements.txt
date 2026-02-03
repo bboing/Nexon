@@ -20,6 +20,7 @@ transformers>=4.40.0
 pandas>=2.2.3
 numpy>=1.24.0
 tqdm>=4.66.0
+sentence-transformers==3.4.2
 
 # Optional: Jupyter support
 # jupyter>=1.0.0

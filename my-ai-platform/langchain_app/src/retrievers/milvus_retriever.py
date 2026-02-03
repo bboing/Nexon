@@ -11,51 +11,36 @@ logger = logging.getLogger(__name__)
 class MilvusRetriever:
     """Milvus 벡터 DB 검색기"""
     
-    def __init__(self):
-        self.collection_name = settings.milvus_collection_name
-        self.dimension = settings.milvus_dimension
+    def __init__(self, collection_name: str = None):
+        # Q&A 컬렉션 기본 사용 (maple_qa)
+        self.collection_name = collection_name or "maple_qa"
+        self.dimension = 384  # paraphrase-multilingual-MiniLM-L12-v2
         self._connect()
-        self._ensure_collection()
+        self._load_collection()
     
     def _connect(self):
         """Milvus 연결"""
         try:
             connections.connect(
                 alias="default",
-                host=settings.milvus_host,
-                port=settings.milvus_port
+                host=settings.MILVUS_HOST,
+                port=settings.MILVUS_PORT
             )
-            logger.info(f"Connected to Milvus at {settings.milvus_host}:{settings.milvus_port}")
+            logger.info(f"Connected to Milvus at {settings.MILVUS_HOST}:{settings.MILVUS_PORT}")
         except Exception as e:
             logger.error(f"Milvus connection failed: {e}")
             raise
     
-    def _ensure_collection(self):
-        """컬렉션 생성 (없으면)"""
+    def _load_collection(self):
+        """기존 컬렉션 로드"""
         if not utility.has_collection(self.collection_name):
-            # 스키마 정의
-            fields = [
-                FieldSchema(name="id", dtype=DataType.VARCHAR, is_primary=True, max_length=100),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.dimension),
-                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="document_id", dtype=DataType.VARCHAR, max_length=100),
-                FieldSchema(name="chunk_index", dtype=DataType.INT64),
-            ]
-            
-            schema = CollectionSchema(fields=fields, description="Document embeddings")
-            collection = Collection(name=self.collection_name, schema=schema)
-            
-            # 인덱스 생성 (HNSW - 빠른 검색)
-            index_params = {
-                "metric_type": "COSINE",
-                "index_type": "HNSW",
-                "params": {"M": 16, "efConstruction": 200}
-            }
-            collection.create_index(field_name="embedding", index_params=index_params)
-            logger.info(f"Created collection: {self.collection_name}")
+            logger.warning(f"컬렉션이 없습니다: {self.collection_name}")
+            logger.warning("먼저 sync_to_milvus.py를 실행하세요!")
+            raise ValueError(f"Collection '{self.collection_name}' does not exist")
         
         self.collection = Collection(self.collection_name)
         self.collection.load()
+        logger.info(f"Loaded collection: {self.collection_name}")
     
     async def insert(self, chunks: List[Dict]) -> List[str]:
         """
@@ -91,20 +76,30 @@ class MilvusRetriever:
         logger.info(f"Inserted {len(chunks)} vectors into Milvus")
         return [chunk["id"] for chunk in chunks]
     
-    async def search(self, query: str, top_k: int = 5) -> List[Dict]:
-        """유사도 검색"""
+    def search(self, query: str, top_k: int = 5) -> List[Dict]:
+        """
+        Q&A 유사도 검색 (동기)
+        
+        Args:
+            query: 검색 쿼리
+            top_k: 반환할 결과 개수
+            
+        Returns:
+            검색 결과 리스트
+        """
         # 쿼리 임베딩
         query_embedding = embedding_model.embed_text(query)
         
         # 검색
         search_params = {"metric_type": "COSINE", "params": {"ef": 100}}
         
+        # maple_qa 컬렉션의 필드: entity_id, entity_name, entity_type, question, answer, qa_type, embedding
         results = self.collection.search(
             data=[query_embedding],
             anns_field="embedding",
             param=search_params,
             limit=top_k,
-            output_fields=["content", "document_id", "chunk_index"]
+            output_fields=["entity_id", "entity_name", "entity_type", "question", "answer", "qa_type"]
         )
         
         # 결과 포맷팅
@@ -112,15 +107,29 @@ class MilvusRetriever:
         for hits in results:
             for hit in hits:
                 retrieved.append({
-                    "content": hit.entity.get("content"),
+                    "id": hit.entity.get("entity_id"),
+                    "canonical_name": hit.entity.get("entity_name"),
+                    "category": hit.entity.get("entity_type"),
+                    "question": hit.entity.get("question"),
+                    "answer": hit.entity.get("answer"),
+                    "qa_type": hit.entity.get("qa_type"),
                     "score": float(hit.score),
-                    "metadata": {
-                        "document_id": hit.entity.get("document_id"),
-                        "chunk_index": hit.entity.get("chunk_index"),
-                    }
+                    "distance": float(hit.distance) if hasattr(hit, 'distance') else 1.0 - float(hit.score)
                 })
         
         return retrieved
+    
+    def get_relevant_documents(self, query: str) -> List[Dict]:
+        """
+        LangChain Retriever 호환 메서드
+        
+        Args:
+            query: 검색 쿼리
+            
+        Returns:
+            검색 결과 (Document 형식이 아닌 Dict)
+        """
+        return self.search(query, top_k=5)
     
     async def delete_by_document(self, document_id: str):
         """문서의 모든 벡터 삭제"""

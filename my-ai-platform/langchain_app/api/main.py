@@ -7,7 +7,8 @@ from contextlib import asynccontextmanager
 import logging
 
 from config.settings import settings
-from api.routers import chat, rag, documents, agents, router
+# 임시로 모든 라우터 비활성화 (LangChain v0.3 마이그레이션 중)
+# from api.routers import chat, rag, documents, agents, router
 
 # 로깅 설정
 logging.basicConfig(
@@ -22,10 +23,19 @@ async def lifespan(app: FastAPI):
     """애플리케이션 생명주기 관리"""
     # 시작 시 실행
     logger.info("🚀 LangChain AI Platform 시작...")
-    logger.info(f"Ollama: {settings.ollama_base_url}")
-    logger.info(f"PostgreSQL: {settings.postgres_host}:{settings.postgres_port}")
-    logger.info(f"Milvus: {settings.milvus_host}:{settings.milvus_port}")
-    logger.info(f"Redis: {settings.redis_host}:{settings.redis_port}")
+    logger.info(f"Ollama: {settings.OLLAMA_BASE_URL}")
+    logger.info(f"PostgreSQL: {settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}")
+    logger.info(f"Milvus: {settings.MILVUS_HOST}:{settings.MILVUS_PORT}")
+    logger.info(f"Redis: {settings.REDIS_HOST}:{settings.REDIS_PORT}")
+    
+    # DB 테이블 초기화
+    logger.info("🗄️ Initializing database tables...")
+    try:
+        from database.session import init_db
+        init_db()
+        logger.info("✅ Database tables initialized")
+    except Exception as e:
+        logger.error(f"❌ Database initialization failed: {e}")
     
     yield
     
@@ -33,8 +43,8 @@ async def lifespan(app: FastAPI):
     logger.info("👋 LangChain AI Platform 종료...")
 
 
-# FastAPI 앱 생성
-app = FastAPI()
+# FastAPI 앱 생성 (lifespan 연결!)
+app = FastAPI(lifespan=lifespan)
 
 # CORS 설정
 app.add_middleware(
@@ -46,11 +56,14 @@ app.add_middleware(
 )
 
 # 라우터 등록
-app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
-app.include_router(rag.router, prefix="/api/rag", tags=["RAG"])
-app.include_router(documents.router, prefix="/api/documents", tags=["Documents"])
-app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
-app.include_router(router.router, prefix="/api/router", tags=["router"])
+# NPC Chat API는 제거됨 (npcs 테이블 불필요)
+
+# TODO: LangChain v0.3 마이그레이션 중
+# app.include_router(chat.router, prefix="/api/chat", tags=["Chat"])
+# app.include_router(rag.router, prefix="/api/rag", tags=["RAG"])
+# app.include_router(documents.router, prefix="/api/documents", tags=["Documents"])
+# app.include_router(agents.router, prefix="/api/agents", tags=["Agents"])
+# app.include_router(router.router, prefix="/api/router", tags=["Router"])
 
 
 @app.get("/")
@@ -69,10 +82,10 @@ async def health_check():
     return {
         "status": "healthy",
         "services": {
-            "ollama": settings.ollama_base_url,
-            "postgres": f"{settings.postgres_host}:{settings.postgres_port}",
-            "milvus": f"{settings.milvus_host}:{settings.milvus_port}",
-            "redis": f"{settings.redis_host}:{settings.redis_port}"
+            "ollama": settings.OLLAMA_BASE_URL,
+            "postgres": f"{settings.POSTGRES_HOST}:{settings.POSTGRES_PORT}",
+            "milvus": f"{settings.MILVUS_HOST}:{settings.MILVUS_PORT}",
+            "redis": f"{settings.REDIS_HOST}:{settings.REDIS_PORT}"
         }
     }
 

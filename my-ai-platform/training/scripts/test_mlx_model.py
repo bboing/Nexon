@@ -14,8 +14,8 @@ def test_model(prompt: str = None):
     print("🍎 MLX 학습 모델 로딩 중...")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
     
-    # 모델 + 어댑터 로드
-    model_name = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    # 모델 + 어댑터 로드 (학습 시와 동일한 모델 사용!)
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
     adapter_path = "../models/llama-game-npc-mlx"
     
     print(f"📦 기본 모델: {model_name}")
@@ -71,8 +71,8 @@ def interactive_mode():
     print("🍎 MLX 학습 모델 - 대화형 모드")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n")
     
-    # 모델 로드
-    model_name = "mlx-community/Llama-3.2-3B-Instruct-4bit"
+    # 모델 로드 (학습 시와 동일한 모델 사용!)
+    model_name = "meta-llama/Llama-3.1-8B-Instruct"
     adapter_path = "../models/llama-game-npc-mlx"
     
     print(f"📦 로딩 중... ", end="", flush=True)
@@ -96,7 +96,7 @@ def interactive_mode():
             
             # 응답 생성
             print("🤖 NPC: ", end="", flush=True)
-            sampler = make_sampler(temp=0.7, top_p=0.9)
+            sampler = make_sampler(temp=0.3, top_p=0.9)  # 더 일관된 답변
             response = generate(
                 model,
                 tokenizer,
