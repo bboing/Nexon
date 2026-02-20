@@ -213,7 +213,8 @@ async def evaluate_search_system(
         3: {"path": "src.retrievers.hybrid_searcher_option3", "name": "Option 3 (Intent 기반)"},
         4: {"path": "src.retrievers.hybrid_searcher_option4", "name": "Option 4 (완전 병렬 + 키워드)"},
         5: {"path": "src.retrievers.hybrid_searcher_sep", "name": "sep (Plan + 키워드, 문장 분류 + 동의어 서치)"},
-        6: {"path": "src.retrievers.hybrid_searcher_hop", "name": "hop (쿼리 깊이 분류 적용)"}
+        6: {"path": "src.retrievers.hybrid_searcher_hop", "name": "hop (쿼리 깊이 분류 적용)"},
+        7: {"path": "src.retrievers.hybrid_searcher_fin", "name": "fin (HOP 구조 + PG canonical_name → Neo4j 보강)"}
     }
     
     config = module_configs.get(option, module_configs[0])
@@ -303,44 +304,47 @@ async def evaluate_search_system(
 
 async def compare_systems():
     """
-    여러 시스템 비교 (현재 vs Option 2 vs Option 3 vs Option 4 vs sep vs hop)
+    여러 시스템 비교 (현재 vs Option 2 vs Option 3 vs Option 4 vs sep vs hop vs fin)
     """
     print("\n" + "="*85)
-    print("검색 시스템 비교: 현재(Plan) vs Option 2(임계값) vs Option 3(Intent) vs Option 4(완전병렬) vs sep(Plan + 키워드, 문장 분류 + 동의어 서치) vs hop(쿼리 깊이 분류 적용)")
+    print("검색 시스템 비교: 현재(Plan) vs Option 2(임계값) vs Option 3(Intent) vs Option 4(완전병렬) vs sep(Plan + 키워드, 문장 분류 + 동의어 서치) vs hop(쿼리 깊이 분류 적용) vs fin(HOP 구조 + PG canonical_name → Neo4j 보강)")
     print("="*85)
     
     # 현재 (Plan) 평가
-    print("\n[1/4] 현재 시스템 (Plan 기반) 평가 중...")
+    print("\n[1/7] 현재 시스템 (Plan 기반) 평가 중...")
     current_results = await evaluate_search_system(verbose=False, option=0)
     
     # Option 2 평가
-    print("\n[2/4] Option 2 (임계값 기반) 평가 중...")
+    print("\n[2/7] Option 2 (임계값 기반) 평가 중...")
     option2_results = await evaluate_search_system(verbose=False, option=2)
     
     # Option 3 평가
-    print("\n[3/4] Option 3 (Intent 기반) 평가 중...")
+    print("\n[3/7] Option 3 (Intent 기반) 평가 중...")
     option3_results = await evaluate_search_system(verbose=False, option=3)
     
     # Option 4 평가
-    print("\n[4/4] Option 4 (완전 병렬 + 키워드) 평가 중...")
+    print("\n[4/7] Option 4 (완전 병렬 + 키워드) 평가 중...")
     option4_results = await evaluate_search_system(verbose=False, option=4)
 
     # sep 평가
-    print("\n[5/6] Option 5 (Plan + 키워드, 문장 분류 + 동의어 서치) 평가 중...")
+    print("\n[5/7] Option 5 (Plan + 키워드, 문장 분류 + 동의어 서치) 평가 중...")
     sep_results = await evaluate_search_system(verbose=False, option=5)
 
     # hop 평가
-    print("\n[6/6] Option 6 (쿼리 깊이 분류 적용) 평가 중...")
+    print("\n[6/7] Option 6 (쿼리 깊이 분류 적용) 평가 중...")
     hop_results = await evaluate_search_system(verbose=False, option=6)
 
+    # fin 평가
+    print("\n[7/7] Option 7 (HOP 구조 + PG canonical_name → Neo4j 보강) 평가 중...")
+    fin_results = await evaluate_search_system(verbose=False, option=7)
 
     
     # 비교표 출력
-    print(f"\n{'='*85}")
+    print(f"\n{'='*125}")
     print(f"비교 결과")
-    print(f"{'='*85}")
-    print(f"{'메트릭':<15s} {'현재(Plan)':<15s} {'Option 2':<15s} {'Option 3':<15s} {'Option 4':<15s} {'sep':<15s} {'hop':<15s}")
-    print(f"{'-'*85}")
+    print(f"{'='*125}")
+    print(f"{'메트릭':<15s} {'현재(Plan)':<15s} {'Option 2':<15s} {'Option 3':<15s} {'Option 4':<15s} {'sep':<15s} {'hop':<15s} {'fin':<15s}")
+    print(f"{'-'*125}")
     
     metrics = ["mrr", "ndcg@10", "ndcg@5", "precision@5", "recall@10"]
     for metric in metrics:
@@ -350,30 +354,31 @@ async def compare_systems():
         opt4_val = option4_results["average"][metric]
         sep_val = sep_results["average"][metric]
         hop_val = hop_results["average"][metric]
-        print(f"{metric:<15s} {current_val:<15.4f} {opt2_val:<15.4f} {opt3_val:<15.4f} {opt4_val:<15.4f} {sep_val:<15.4f} {hop_val:<15.4f}")
+        fin_val = fin_results["average"][metric]
+        print(f"{metric:<15s} {current_val:<15.4f} {opt2_val:<15.4f} {opt3_val:<15.4f} {opt4_val:<15.4f} {sep_val:<15.4f} {hop_val:<15.4f} {fin_val:<15.4f}")
     
-    print(f"{'='*85}")
+    print(f"{'='*125}")
     
     # 최고 성능 표시
-    best_mrr = max(current_results["average"]["mrr"], 
-                   option2_results["average"]["mrr"],
-                   option3_results["average"]["mrr"],
-                   option4_results["average"]["mrr"],
-                   sep_results["average"]["mrr"],
-                   hop_results["average"]["mrr"])
-    
-    if best_mrr == current_results["average"]["mrr"]:
-        print("\n🏆 최고 성능: 현재 (Plan 기반)")
-    elif best_mrr == option2_results["average"]["mrr"]:
-        print("\n🏆 최고 성능: Option 2 (임계값 기반)")
-    elif best_mrr == option3_results["average"]["mrr"]:
-        print("\n🏆 최고 성능: Option 3 (Intent 기반)")
-    elif best_mrr == option4_results["average"]["mrr"]:
-        print("\n🏆 최고 성능: Option 4 (완전 병렬 + 키워드)")
-    elif best_mrr == sep_results["average"]["mrr"]:
-        print("\n🏆 최고 성능: sep (Plan + 키워드, 문장 분류 + 동의어 서치)")
-    else:
-        print("\n🏆 최고 성능: hop (쿼리 깊이 분류 적용)")
+    systems = {
+        "현재 (Plan 기반)": current_results["average"],
+        "Option 2 (임계값 기반)": option2_results["average"],
+        "Option 3 (Intent 기반)": option3_results["average"],
+        "Option 4 (완전 병렬 + 키워드)": option4_results["average"],
+        "sep (Plan + 키워드, 문장 분류 + 동의어 서치)": sep_results["average"],
+        "hop (쿼리 깊이 분류 적용)": hop_results["average"],
+        "fin (HOP 구조 + PG canonical_name → Neo4j 보강)": fin_results["average"],
+    }
+
+    best_name = max(systems, key=lambda name: (
+        systems[name]["mrr"],
+        systems[name]["ndcg@10"],
+        systems[name]["ndcg@5"],
+        systems[name]["precision@5"],
+        systems[name]["recall@10"]
+    ))
+
+    print(f"\n🏆 최고 성능: {best_name}")
 
     # 비교 결과 저장
     output_dir = ROOT_DIR / "training/data/output_data"
@@ -388,7 +393,8 @@ async def compare_systems():
         "option3": option3_results["average"],
         "option4": option4_results["average"],
         "sep": sep_results["average"],
-        "hop": hop_results["average"]
+        "hop": hop_results["average"],
+        "fin": fin_results["average"]
     }
     
     with open(output_file_path, "w", encoding="utf-8") as f:
@@ -402,8 +408,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="검색 시스템 평가")
     parser.add_argument("--mode", choices=["single", "compare"], default="single",
                         help="평가 모드 (single: 단일 평가, compare: 시스템 비교)")
-    parser.add_argument("--option", type=int, choices=[0, 2, 3, 4, 5, 6], default=0,
-                        help="검색 옵션 (0: 현재(Plan), 2: 임계값, 3: Intent, 4: 완전병렬, 5: 키워드, 문장 분리, 6: 쿼리 깊이 분류)")
+    parser.add_argument("--option", type=int, choices=[0, 2, 3, 4, 5, 6, 7], default=0,
+                        help="검색 옵션 (0: 현재(Plan), 2: 임계값, 3: Intent, 4: 완전병렬, 5: 키워드 문장 분리, 6: 쿼리 깊이 분류, 7: HOP 구조 + PG canonical_name → Neo4j 보강)")
     parser.add_argument("--verbose", action="store_true", help="상세 출력")
     
     args = parser.parse_args()
