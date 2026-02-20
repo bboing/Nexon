@@ -1,16 +1,12 @@
 """
 Router Agent - Query Intent 분석 및 검색 전략 결정
 """
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List
 from enum import Enum
-from langchain_ollama import ChatOllama
-from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage, SystemMessage
-from config.settings import settings
+from src.models.llm import create_llm, switch_to_groq
 import json
 import logging
-import requests
-import os
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +38,8 @@ class QueryIntent(str, Enum):
     
     # 일반
     GENERAL = "general"                # 일반 질문
+    RELATION = "relation"
+    LOCATION = "location"
 
 
 class SearchStrategy(str, Enum):
@@ -127,7 +125,9 @@ Intent에 따른 Category:
    - 용도: 아이템/NPC/맵/몬스터의 고정된 스펙 조회
    - 강점: 빠르고 정확한 검색 (0.1초), 가격/수치/이름/설명
    - 예시: "아이스진 가격", "다크로드 위치", "스포아 레벨"
-   - 쿼리 형식: 엔티티 이름 or 속성명
+   - ✅ 검색 대상: Entity(명사)만 - 고유명사, 아이템명, NPC명, 맵명
+   - ❌ 검색 불가: Sentence(동사구) - "물약 파는 사람", "포션 팔아주는 NPC"
+   - 쿼리 형식: entities 리스트 (명사만)
 
 2. **GRAPH_DB** (Neo4j - 관계 추적)
    - 용도: 엔티티 간의 연결 관계 추적
@@ -143,26 +143,43 @@ Intent에 따른 Category:
    - 쿼리 형식: "엔티티A → 관계 → 엔티티B"
 
 3. **VECTOR_DB** (Milvus - 의미 검색)
-   - 용도: 의미/맥락이 비슷한 정보 추천
-   - 강점: 태그 기반 검색, 추천, 분위기/컨셉 매칭
+   - 용도: 의미/맥락이 비슷한 정보 추천, 간접 표현 처리
+   - 강점: 태그 기반 검색, 추천, 분위기/컨셉 매칭, Sentence 의미 매칭
    - 예시: "도적 사냥터 추천", "초보자 사냥터", "돈 잘 버는 아이템"
-   - 쿼리 형식: 자연어 질문 or 컨셉
+   - ✅ 검색 대상: Sentence(동사구) - "물약 파는 사람", "포션 팔아주는 NPC", "전직 하는 곳"
+   - ✅ 추천 쿼리: "도적 사냥터", "초보 맵"
+   - 쿼리 형식: sentences 리스트 (동사구) or 자연어 질문
+
+[관계 깊이(Hop) 분류]
+
+**1-hop 관계** (Postgres + Milvus로 해결 가능):
+- NPC ↔ MAP: "다크로드 어디 있어?"
+- MONSTER ↔ MAP: "스포아 어디 나와?"
+- ITEM ↔ MONSTER: "아이스진 드랍하는 몬스터는?"
+- ITEM ↔ NPC: "아이스진 파는 곳은?"
+→ 직접 관계, Neo4j 불필요
+
+**2-hop 관계** (Neo4j 필요):
+- ITEM → MONSTER → MAP: "아이스진 얻으려면 어떻게 하나요?"
+- QUEST → NPC → MAP: "도적 전직하려면 어디로 가야되나요?"
+- MAP → MAP → ...: "헤네시스에서 엘리니아 가는 법?"
+→ 체인 관계, Neo4j 필수
 
 [전략 수립 원칙]
 
-1. **단순 → 복잡 순서**로 검색 (빠른 도구부터)
-   - 이름 검색 → SQL_DB 먼저
-   - 관계 추적 → GRAPH_DB
-   - 추천/비슷한 것 → VECTOR_DB
+1. **관계 깊이 우선 판단**
+   - 1-hop: Postgres + Milvus만
+   - 2-hop 이상: Postgres + Milvus + Neo4j
 
-2. **필요한 정보만** 검색
-   - "다크로드 어디?" → SQL_DB만 (위치 정보 있음)
-   - "도적 전직 어디서?" → SQL_DB(전직 NPC) + GRAPH_DB(NPC→MAP 위치)
+2. **Entity vs Sentence 분리**
+   - Entity(명사) → SQL_DB
+   - Sentence(동사구) → VECTOR_DB
 
-3. **의도 파악이 핵심**
-   - "도적 사냥터" → VECTOR_DB (추천 의도)
-   - "도적 전직" → SQL_DB (특정 NPC 찾기)
-   - "스포아 잡으려면?" → SQL_DB(스포아 정보) + GRAPH_DB(스포아→MAP)
+3. **예시**
+   - "다크로드 어디?" → hop=1, Entity=['다크로드']
+   - "도적 전직 어디?" → hop=2, Entity=['도적', '전직']
+   - "물약 파는 사람" → hop=1, Sentence=['물약 파는 사람']
+   - "아이스진 얻으려면?" → hop=2, Entity=['아이스진']
 
 [출력 규격]
 
@@ -170,155 +187,93 @@ Intent에 따른 Category:
 
 {
   "thought": "유저 질문 분석 (무엇을 원하는지, 어떤 정보가 필요한지)",
-  "plan": [
-    {
-      "step": 1,
-      "tool": "SQL_DB|GRAPH_DB|VECTOR_DB",
-      "query": "검색할 내용",
-      "reason": "이 도구를 이 순서에 쓰는 이유",
-      "expected": "이 단계에서 얻을 정보"
-    }
-  ]
+  "hop": 1,  // 관계 깊이 (1 or 2)
+  "relation": "NPC-MAP",  // 관계 유형 (옵션)
+  "entities": ["엔티티1", "엔티티2"],  // 명사 (예: ["리스항구", "아이스진"])
+  "sentences": ["문장1"]                // 동사구 (예: ["물약 파는 사람"])
 }
+
+**중요**: 
+- hop=1: 직접 관계 (NPC-MAP, ITEM-MONSTER 등)
+- hop=2: 체인 관계 (ITEM-MONSTER-MAP, QUEST-NPC-MAP 등)
+- entities: 명사만 추출
+- sentences: 동사구만 추출
 
 [예시]
 
 질문: "도적 전직 어디서?"
 {
-  "thought": "도적으로 전직하려면 전직 담당 NPC를 찾고, 그 NPC의 위치를 알아야 함",
-  "plan": [
-    {
-      "step": 1,
-      "tool": "SQL_DB",
-      "query": "도적 전직 NPC",
-      "reason": "먼저 전직을 담당하는 NPC 이름과 기본 정보 조회",
-      "expected": "다크로드(NPC)"
-    },
-    {
-      "step": 2,
-      "tool": "GRAPH_DB",
-      "query": "다크로드 → 위치 → MAP",
-      "reason": "NPC가 어느 맵에 있는지 관계 추적",
-      "expected": "여섯갈래길(MAP)"
-    }
-  ]
+  "thought": "도적 전직은 QUEST-NPC-MAP 체인 관계 (2-hop)",
+  "hop": 2,
+  "relation": "QUEST-NPC-MAP",
+  "entities": ["도적", "전직"],
+  "sentences": []
 }
 
 질문: "도적 사냥터 추천"
 {
-  "thought": "도적 직업에 적합한 사냥터를 추천해야 함. 레벨대/특성 고려 필요",
-  "plan": [
-    {
-      "step": 1,
-      "tool": "VECTOR_DB",
-      "query": "도적 직업 적합한 사냥터",
-      "reason": "의미 기반으로 도적 특성에 맞는 맵/몬스터 추천",
-      "expected": "추천 사냥터 리스트(MAP, MONSTER)"
-    }
-  ]
+  "thought": "사냥터 추천은 의미 기반 검색 (1-hop)",
+  "hop": 1,
+  "relation": "JOB-MAP",
+  "entities": ["도적"],
+  "sentences": ["사냥터"]
 }
 
 질문: "아이스진 어디서 구해?"
 {
-  "thought": "아이스진을 구하는 방법 - 구매 or 드랍. 두 경로 모두 확인",
-  "plan": [
-    {
-      "step": 1,
-      "tool": "SQL_DB",
-      "query": "아이스진",
-      "reason": "아이템 기본 정보 조회",
-      "expected": "아이스진 스펙, 가격"
-    },
-    {
-      "step": 2,
-      "tool": "GRAPH_DB",
-      "query": "아이스진 → 판매 NPC",
-      "reason": "어느 NPC가 파는지 확인",
-      "expected": "판매 NPC 리스트"
-    },
-    {
-      "step": 3,
-      "tool": "GRAPH_DB",
-      "query": "아이스진 → 드랍 몬스터",
-      "reason": "어느 몬스터가 떨구는지 확인",
-      "expected": "드랍 몬스터 리스트"
-    }
-  ]
+  "thought": "아이스진 구하기는 ITEM-NPC 또는 ITEM-MONSTER 관계 (1-hop)",
+  "hop": 1,
+  "relation": "ITEM-NPC/MONSTER",
+  "entities": ["아이스진"],
+  "sentences": []
+}
+
+질문: "물약 파는 사람 누구야?"
+{
+  "thought": "간접 표현으로 NPC 찾기 (1-hop)",
+  "hop": 1,
+  "relation": "ITEM-NPC",
+  "entities": [],
+  "sentences": ["물약 파는 사람"]
+}
+
+질문: "리스항구에서 물약 사는 곳"
+{
+  "thought": "리스항구(Entity)와 물약 사는 곳(Sentence) 모두 검색 (1-hop)",
+  "hop": 1,
+  "relation": "MAP-NPC",
+  "entities": ["리스항구"],
+  "sentences": ["물약 사는 곳"]
+}
+
+질문: "아이스진 얻으려면 어떻게 하나요?"
+{
+  "thought": "아이스진을 얻는 방법: ITEM-MONSTER-MAP 체인 관계 (2-hop)",
+  "hop": 2,
+  "relation": "ITEM-MONSTER-MAP",
+  "entities": ["아이스진"],
+  "sentences": []
 }
 
 이제 유저 질문에 대한 최적의 검색 전략을 JSON으로 답해줘."""
 
     def __init__(
         self,
-        llm: Optional[ChatOllama] = None,
+        llm=None,
         use_strategy_planner: bool = True,
-        verbose: bool = False
+        verbose: bool = False,
     ):
-        # LLM이 명시적으로 전달되면 그대로 사용
-        if llm:
-            self.llm = llm
-        else:
-            # Health check로 Ollama/Groq 자동 선택
-            self.llm = self._initialize_llm()
-        
+        self.llm = llm if llm else create_llm(temperature=0.0)
         self.use_strategy_planner = use_strategy_planner
         self.verbose = verbose
-    
-    def _initialize_llm(self):
-        """Ollama health check 후 Groq fallback"""
-        # 1. Ollama health check
-        try:
-            ollama_url = settings.OLLAMA_BASE_URL
-            response = requests.get(f"{ollama_url}/api/tags", timeout=2)
-            
-            if response.status_code == 200:
-                logger.info(f"✅ Ollama 연결 성공: {ollama_url}")
-                return ChatOllama(
-                    model=settings.OLLAMA_MODEL,
-                    base_url=ollama_url,
-                    temperature=0.0
-                )
-        except Exception as e:
-            logger.warning(f"⚠️ Ollama 연결 실패: {e}")
-        
-        # 2. Groq fallback
-        try:
-            groq_api_key = getattr(settings, 'GROQ_API_KEY', None) or os.getenv('GROQ_API_KEY')
-            groq_model = getattr(settings, 'GROQ_MODEL_NAME', None) or os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
-            
-            if not groq_api_key:
-                raise ValueError("GROQ_API_KEY not found in settings or environment")
-            
-            logger.info(f"✅ Groq fallback 활성화: {groq_model}")
-            return ChatGroq(
-                model=groq_model,
-                api_key=groq_api_key,
-                temperature=0.0
-            )
-        except Exception as e:
-            logger.error(f"❌ router_agent.py: Groq fallback도 실패: {e}")
-            raise RuntimeError("router_agent.py: Ollama와 Groq 모두 사용 불가능합니다.")
-    
+
     def _switch_to_groq(self):
         """Runtime에 Ollama 실패 시 Groq으로 전환"""
-        try:
-            groq_api_key = getattr(settings, 'GROQ_API_KEY', None) or os.getenv('GROQ_API_KEY')
-            groq_model = getattr(settings, 'GROQ_MODEL_NAME', None) or os.getenv('GROQ_MODEL_NAME', 'llama-3.3-70b-versatile')
-            
-            if not groq_api_key:
-                logger.error("GROQ_API_KEY not found")
-                return
-            
-            logger.info(f"🔄 Groq으로 전환: {groq_model}")
-            self.llm = ChatGroq(
-                model=groq_model,
-                api_key=groq_api_key,
-                temperature=0.0
-            )
-        except Exception as e:
-            logger.error(f"❌ Groq 전환 실패: {e}")
+        result = switch_to_groq(temperature=0.0)
+        if result:
+            self.llm = result
     
-    def plan_search_strategy(self, query: str) -> Dict[str, Any]:
+    async def plan_search_strategy(self, query: str) -> Dict[str, Any]:
         """
         전략 분석가 모드: Multi-step 검색 계획 수립
         
@@ -344,14 +299,16 @@ Intent에 따른 Category:
         
         try:
             # LLM으로 검색 전략 수립
+            print("router_agent_hop.plan_search_strategy 호출 됨")
             messages = [
                 SystemMessage(content=self.STRATEGY_PLANNER_PROMPT),
                 HumanMessage(content=f"유저 질문: {query}")
             ]
             
-            response = self.llm.invoke(messages)
-            
+            response = await self.llm.ainvoke(messages)
+
             # JSON 파싱
+            print("json 파싱 시작")
             result = self._parse_plan_response(response.content)
             
             if self.verbose:
@@ -366,7 +323,7 @@ Intent에 따른 Category:
             logger.warning(f"Strategy Planner 실패: {e}")
             raise
     
-    def route(self, query: str) -> Dict[str, Any]:
+    async def route(self, query: str) -> Dict[str, Any]:
         """
         Query를 분석하여 검색 전략 결정
         
@@ -391,13 +348,16 @@ Intent에 따른 Category:
                 "categories": List[str],  # plan에서 추론
             }
         """
+        print("router_agent_hop.route 함수 호출 됨")
         if self.verbose:
             print(f"\n🧭 Router: 분석 중... '{query}'")
         
         # 전략 수립 모드 시도
         if self.use_strategy_planner:
             try:
-                plan_result = self.plan_search_strategy(query)
+                print("try 구문 진입 완료")
+                print(f"query: {query}")
+                plan_result = await self.plan_search_strategy(query)
                 # Plan을 기존 형식으로도 변환 (하위 호환)
                 converted = self._convert_plan_to_route(plan_result, query)
                 return {**plan_result, **converted}
@@ -415,11 +375,11 @@ Intent에 따른 Category:
                 HumanMessage(content=f"질문: {query}\n\nJSON 형식으로 분석 결과를 응답해주세요.")
             ]
             
-            response = self.llm.invoke(messages)
-            
+            response = await self.llm.ainvoke(messages)
+
             # JSON 파싱
             result = self._parse_response(response.content)
-            
+
             if self.verbose:
                 print(f"   Intent: {result['intent']}")
                 print(f"   Categories: {result['categories']}")
@@ -440,7 +400,7 @@ Intent에 따른 Category:
                         SystemMessage(content=self.ROUTER_SYSTEM_PROMPT),
                         HumanMessage(content=f"질문: {query}\n\nJSON 형식으로 분석 결과를 응답해주세요.")
                     ]
-                    response = self.llm.invoke(messages)
+                    response = await self.llm.ainvoke(messages)
                     result = self._parse_response(response.content)
                     return result
                 except:
@@ -481,6 +441,7 @@ Intent에 따른 Category:
     def _parse_plan_response(self, content: str) -> Dict[str, Any]:
         """LLM 응답을 파싱 (전략 수립 형식)"""
         try:
+            print("router_agent_hop._parse_plan_response 함수 호출 됨")
             # JSON 블록 추출
             if "```json" in content:
                 start = content.find("```json") + 7
@@ -493,9 +454,11 @@ Intent에 따른 Category:
             
             # ✅ LLM이 {{를 쓰는 문제 해결
             content = content.replace("{{", "{").replace("}}", "}")
+            print(f"content: {content}")
             
             # 디버깅: 파싱 시도 전 내용 출력
             if self.verbose:
+                print(f"\n[DEBUG] 파싱 결과: {data}")
                 print(f"\n[DEBUG] 파싱할 내용:\n{content[:500]}\n")
             
             # JSON 파싱
@@ -503,7 +466,10 @@ Intent에 따른 Category:
             
             return {
                 "thought": data.get("thought", ""),
-                "plan": data.get("plan", [])
+                "hop": data.get("hop", 1),
+                "relation": data.get("relation", ""),
+                "entities": data.get("entities", []),
+                "sentences": data.get("sentences", [])
             }
             
         except json.JSONDecodeError as e:
@@ -513,55 +479,35 @@ Intent에 따른 Category:
     
     def _convert_plan_to_route(self, plan_result: Dict[str, Any], query: str) -> Dict[str, Any]:
         """
-        Plan 결과를 기존 Route 형식으로 변환 (하위 호환)
+        HOP 결과를 기존 Route 형식으로 변환 (하위 호환)
         
         Args:
-            plan_result: Plan 결과
+            plan_result: HOP 결과 (hop, entities, sentences)
             query: 원본 사용자 질문
-        
-        Tool → Category 매핑:
-        - SQL_DB → 첫 번째 query에서 추론
-        - GRAPH_DB → 관계에서 추론
-        - VECTOR_DB → 추천 의도
         """
-        plan = plan_result.get("plan", [])
+        hop = plan_result.get("hop", 1)
+        relation = plan_result.get("relation", "")
+        entities = plan_result.get("entities", [])
+        sentences = plan_result.get("sentences", [])
         
-        if not plan:
-            return {
-                "intent": QueryIntent.GENERAL,
-                "categories": [],
-                "strategy": SearchStrategy.SEMANTIC,
-                "keywords": [],
-                "reasoning": plan_result.get("thought", "")
-            }
+        # hop 기반 strategy 결정
+        if hop >= 2:
+            strategy = SearchStrategy.RELATION  # Neo4j 필요
+        elif sentences:
+            strategy = SearchStrategy.SEMANTIC  # Milvus 의미 검색
+        else:
+            strategy = SearchStrategy.SIMPLE  # Postgres만
         
-        # 첫 번째 step의 tool로 strategy 결정
-        first_tool = plan[0].get("tool", "SQL_DB")
-        
-        strategy_map = {
-            "SQL_DB": SearchStrategy.SIMPLE,
-            "GRAPH_DB": SearchStrategy.RELATION,
-            "VECTOR_DB": SearchStrategy.SEMANTIC
-        }
-        
-        strategy = strategy_map.get(first_tool, SearchStrategy.HYBRID)
-        
-        # Plan에서 category 추론
+        # relation에서 category 추론
         categories = []
-        for step in plan:
-            query_lower = step.get("query", "").lower()
-            if any(word in query_lower for word in ["npc", "엔피시", "상인"]):
-                if "NPC" not in categories:
-                    categories.append("NPC")
-            if any(word in query_lower for word in ["map", "맵", "사냥터", "지역"]):
-                if "MAP" not in categories:
-                    categories.append("MAP")
-            if any(word in query_lower for word in ["monster", "몬스터", "몹"]):
-                if "MONSTER" not in categories:
-                    categories.append("MONSTER")
-            if any(word in query_lower for word in ["item", "아이템"]):
-                if "ITEM" not in categories:
-                    categories.append("ITEM")
+        if "NPC" in relation:
+            categories.append("NPC")
+        if "MAP" in relation:
+            categories.append("MAP")
+        if "MONSTER" in relation:
+            categories.append("MONSTER")
+        if "ITEM" in relation:
+            categories.append("ITEM")
         
         # ✅ 원본 질문 기반 Category 보정 (LLM이 놓친 경우 대비)
         original_lower = query.lower()
@@ -587,42 +533,34 @@ Intent에 따른 Category:
             if "MAP" not in categories:
                 categories.append("MAP")
         
-        # Intent 추론 (thought + 원본 질문 기반)
+        # Intent 추론 (hop 기반)
         thought_lower = plan_result.get("thought", "").lower()
-        intent = QueryIntent.GENERAL
         
-        # 전직
-        if "전직" in thought_lower or "전직" in original_lower:
+        if hop >= 2:
+            intent = QueryIntent.RELATION  # 체인 관계
+        elif "전직" in original_lower:
             intent = QueryIntent.CLASS_CHANGE
-        # 사냥터
-        elif ("사냥터" in thought_lower or "추천" in thought_lower) or \
-             ("사냥터" in original_lower or ("추천" in original_lower and "레벨" in original_lower)):
+        elif "사냥터" in original_lower or "추천" in original_lower:
             intent = QueryIntent.HUNTING_GROUND
-        # 아이템 구매
-        elif ("구매" in thought_lower or "파는" in thought_lower) or \
-             any(word in original_lower for word in ["구하", "구매", "사", "파는"]):
+        elif any(word in original_lower for word in ["구하", "구매", "사", "파는"]):
             intent = QueryIntent.ITEM_PURCHASE
-        # 아이템 드랍
-        elif ("드랍" in thought_lower or "떨구" in thought_lower) or \
-             any(word in original_lower for word in ["드랍", "떨구", "나와"]):
+        elif any(word in original_lower for word in ["드랍", "떨구", "나와"]):
             intent = QueryIntent.ITEM_DROP
-        # 몬스터 위치
-        elif any(word in original_lower for word in ["잡", "몬스터"]) and "어디" in original_lower:
-            intent = QueryIntent.MONSTER_LOCATION
-        # NPC 위치
-        elif ("위치" in thought_lower and "npc" in thought_lower) or \
-             (any(word in original_lower for word in ["npc", "엔피시"]) and "어디" in original_lower):
-            intent = QueryIntent.NPC_LOCATION
-        # 맵 위치
-        elif "어디" in original_lower and ("맵" in original_lower or "가는" in original_lower):
-            intent = QueryIntent.MAP_LOCATION
+        elif "어디" in original_lower:
+            intent = QueryIntent.LOCATION
+        else:
+            intent = QueryIntent.GENERAL
         
         return {
             "intent": intent,
             "categories": categories,
             "strategy": strategy,
-            "keywords": [step.get("query", "") for step in plan],
-            "reasoning": plan_result.get("thought", "")
+            "keywords": entities + sentences,
+            "reasoning": plan_result.get("thought", ""),
+            "hop": hop,
+            "relation": relation,
+            "entities": entities,
+            "sentences": sentences
         }
     
     def _fallback_classification(self, query: str) -> Dict[str, Any]:

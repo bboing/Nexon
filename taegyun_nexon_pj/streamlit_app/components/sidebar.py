@@ -1,44 +1,35 @@
 """
 Sidebar Component
-API Key 입력 및 설정
+설정 및 정보 표시
 """
 import streamlit as st
+import os
 
 
-def render_sidebar() -> str:
+def render_sidebar():
     """
     사이드바 렌더링
-    
-    Returns:
-        Groq API Key (입력된 경우)
     """
-    st.sidebar.title("🔐 Security Settings")
+    st.sidebar.title("⚙️ 설정")
     
-    # API Key 입력
-    groq_api_key = st.sidebar.text_input(
-        "Groq API Key",
-        type="password",
-        help="키는 서버에 저장되지 않고 세션 동안만 유지됩니다.",
-        placeholder="gsk_..."
-    )
+    # LLM 상태 표시
+    groq_api_key = os.getenv("GROQ_API_KEY")
+    ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
     
+    st.sidebar.markdown("### 🤖 LLM 엔진")
     if groq_api_key:
-        st.sidebar.success("✅ API Key 입력됨")
+        st.sidebar.success("✅ Groq API 사용 가능")
+    else:
+        st.sidebar.info("ℹ️ Groq API 미설정")
+    
+    st.sidebar.info(f"🦙 Ollama: `{ollama_url}`")
+    st.sidebar.caption("(자동으로 Ollama → Groq fallback)")
     
     # 구분선
     st.sidebar.divider()
     
     # 고급 설정 (옵션)
     with st.sidebar.expander("⚙️ 고급 설정"):
-        st.session_state.temperature = st.slider(
-            "Temperature",
-            min_value=0.0,
-            max_value=1.0,
-            value=0.3,
-            step=0.1,
-            help="낮을수록 정확하고 일관적, 높을수록 창의적"
-        )
-        
         st.session_state.max_results = st.slider(
             "최대 검색 결과",
             min_value=3,
@@ -61,5 +52,3 @@ def render_sidebar() -> str:
     - "스포아 어디서 잡아?"
     - "아이스진 어디서 구해?"
     """)
-    
-    return groq_api_key

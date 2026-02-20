@@ -5,6 +5,7 @@ Query Transformer for Milvus
 from typing import List, Optional
 from langchain_community.chat_models import ChatOllama
 from langchain_core.messages import HumanMessage
+from config.settings import settings
 import logging
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,8 @@ class QueryTransformer:
         # LLM 없으면 기본 생성 (transformer 전용 경량 모델)
         if self.llm is None and strategy in ["hyde", "hybrid"]:
             self.llm = ChatOllama(
-                base_url="http://localhost:11434",
-                model="llama3.1:latest",  # 빠른 모델
+                base_url=settings.OLLAMA_BASE_URL,  # ✅ 환경변수
+                model=settings.OLLAMA_MODEL,  # ✅ 환경변수
                 temperature=0.3  # 약간의 창의성
             )
     

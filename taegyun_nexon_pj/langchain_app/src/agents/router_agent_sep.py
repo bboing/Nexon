@@ -127,7 +127,9 @@ Intent에 따른 Category:
    - 용도: 아이템/NPC/맵/몬스터의 고정된 스펙 조회
    - 강점: 빠르고 정확한 검색 (0.1초), 가격/수치/이름/설명
    - 예시: "아이스진 가격", "다크로드 위치", "스포아 레벨"
-   - 쿼리 형식: 엔티티 이름 or 속성명
+   - ✅ 검색 대상: Entity(명사)만 - 고유명사, 아이템명, NPC명, 맵명
+   - ❌ 검색 불가: Sentence(동사구) - "물약 파는 사람", "포션 팔아주는 NPC"
+   - 쿼리 형식: entities 리스트 (명사만)
 
 2. **GRAPH_DB** (Neo4j - 관계 추적)
    - 용도: 엔티티 간의 연결 관계 추적
@@ -143,10 +145,12 @@ Intent에 따른 Category:
    - 쿼리 형식: "엔티티A → 관계 → 엔티티B"
 
 3. **VECTOR_DB** (Milvus - 의미 검색)
-   - 용도: 의미/맥락이 비슷한 정보 추천
-   - 강점: 태그 기반 검색, 추천, 분위기/컨셉 매칭
+   - 용도: 의미/맥락이 비슷한 정보 추천, 간접 표현 처리
+   - 강점: 태그 기반 검색, 추천, 분위기/컨셉 매칭, Sentence 의미 매칭
    - 예시: "도적 사냥터 추천", "초보자 사냥터", "돈 잘 버는 아이템"
-   - 쿼리 형식: 자연어 질문 or 컨셉
+   - ✅ 검색 대상: Sentence(동사구) - "물약 파는 사람", "포션 팔아주는 NPC", "전직 하는 곳"
+   - ✅ 추천 쿼리: "도적 사냥터", "초보 맵"
+   - 쿼리 형식: sentences 리스트 (동사구) or 자연어 질문
 
 [전략 수립 원칙]
 
@@ -174,12 +178,19 @@ Intent에 따른 Category:
     {
       "step": 1,
       "tool": "SQL_DB|GRAPH_DB|VECTOR_DB",
+      "entities": ["엔티티1", "엔티티2"],  // SQL_DB용: 명사만 (예: ["리스항구", "물약"])
+      "sentences": ["문장1"],               // VECTOR_DB용: 동사구 (예: ["물약 파는 사람"])
       "query": "검색할 내용",
       "reason": "이 도구를 이 순서에 쓰는 이유",
       "expected": "이 단계에서 얻을 정보"
     }
   ]
 }
+
+**중요**: 
+- SQL_DB → entities만 채우고 sentences는 []
+- VECTOR_DB → sentences만 채우고 entities는 []
+- GRAPH_DB → query만 사용 (entities/sentences 무시)
 
 [예시]
 
@@ -190,6 +201,8 @@ Intent에 따른 Category:
     {
       "step": 1,
       "tool": "SQL_DB",
+      "entities": ["도적", "전직"],
+      "sentences": [],
       "query": "도적 전직 NPC",
       "reason": "먼저 전직을 담당하는 NPC 이름과 기본 정보 조회",
       "expected": "다크로드(NPC)"
@@ -197,6 +210,8 @@ Intent에 따른 Category:
     {
       "step": 2,
       "tool": "GRAPH_DB",
+      "entities": [],
+      "sentences": [],
       "query": "다크로드 → 위치 → MAP",
       "reason": "NPC가 어느 맵에 있는지 관계 추적",
       "expected": "여섯갈래길(MAP)"
@@ -211,6 +226,8 @@ Intent에 따른 Category:
     {
       "step": 1,
       "tool": "VECTOR_DB",
+      "entities": [],
+      "sentences": ["도적 사냥터"],
       "query": "도적 직업 적합한 사냥터",
       "reason": "의미 기반으로 도적 특성에 맞는 맵/몬스터 추천",
       "expected": "추천 사냥터 리스트(MAP, MONSTER)"
@@ -225,6 +242,8 @@ Intent에 따른 Category:
     {
       "step": 1,
       "tool": "SQL_DB",
+      "entities": ["아이스진"],
+      "sentences": [],
       "query": "아이스진",
       "reason": "아이템 기본 정보 조회",
       "expected": "아이스진 스펙, 가격"
@@ -232,6 +251,8 @@ Intent에 따른 Category:
     {
       "step": 2,
       "tool": "GRAPH_DB",
+      "entities": [],
+      "sentences": [],
       "query": "아이스진 → 판매 NPC",
       "reason": "어느 NPC가 파는지 확인",
       "expected": "판매 NPC 리스트"
@@ -239,9 +260,52 @@ Intent에 따른 Category:
     {
       "step": 3,
       "tool": "GRAPH_DB",
+      "entities": [],
+      "sentences": [],
       "query": "아이스진 → 드랍 몬스터",
       "reason": "어느 몬스터가 떨구는지 확인",
       "expected": "드랍 몬스터 리스트"
+    }
+  ]
+}
+
+질문: "물약 파는 사람 누구야?"
+{
+  "thought": "'물약 파는 사람'은 간접 표현. 의미 검색으로 포션 상인 NPC 찾기",
+  "plan": [
+    {
+      "step": 1,
+      "tool": "VECTOR_DB",
+      "entities": [],
+      "sentences": ["물약 파는 사람"],
+      "query": "물약 파는 사람",
+      "reason": "동사구 간접 표현을 의미 검색으로 처리",
+      "expected": "미나(NPC - 포션 상인)"
+    }
+  ]
+}
+
+질문: "리스항구에서 물약 사는 곳"
+{
+  "thought": "리스항구(Entity)에서 물약 사는 곳(Sentence) 찾기. 두 가지 모두 검색 필요",
+  "plan": [
+    {
+      "step": 1,
+      "tool": "SQL_DB",
+      "entities": ["리스항구"],
+      "sentences": [],
+      "query": "리스항구",
+      "reason": "맵 정보 조회",
+      "expected": "리스항구(MAP)"
+    },
+    {
+      "step": 2,
+      "tool": "VECTOR_DB",
+      "entities": [],
+      "sentences": ["물약 사는 곳"],
+      "query": "물약 사는 곳",
+      "reason": "간접 표현을 의미 검색으로 NPC 찾기",
+      "expected": "미나(NPC)"
     }
   ]
 }

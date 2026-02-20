@@ -1,8 +1,13 @@
 """
-Hybrid Search with Intent-based Routing (Async)
-Router Agent → Category 우선순위 결정 → PostgreSQL/Milvus 검색
-+ Plan Execution: Multi-step 검색 전략 실행
-+ Kiwi 형태소 분석 기반 키워드 추출
+Hybrid Search - Option 4: Parallel Execution with Query Expansion (Async)
+
+전략:
+1. LLM으로 키워드 3개 추출 (초경량)
+2. 3개 DB 완전 병렬 실행 (asyncio.gather)
+3. RRF 가중치 조절 (PG:1.0, Neo4j:0.8, Milvus:0.3)
+4. canonical_name 통일 검색
+
+장점: 완전 병렬, LLM 최소화, 누락 없음
 """
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,98 +104,77 @@ class HybridSearcher:
         self,
         query: str,
         category: Optional[str] = None,
-        limit: int = 10,
-        pg_threshold: int = 3,
-        use_plan_execution: bool = True
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Intent 기반 하이브리드 검색 + Plan Execution
+        Option 4: Parallel Execution with Query Expansion
+        
+        전략:
+        1. LLM으로 키워드 3개 추출 (초경량)
+        2. 3개 DB 완전 병렬 실행
+        3. RRF 가중치 조절 (PG:1.0, Neo4j:0.8, Milvus:0.3)
         
         Args:
             query: 검색 쿼리
-            category: 카테고리 필터 (옵션, Router가 자동 결정)
+            category: 미사용
             limit: 최대 결과 개수
-            pg_threshold: PostgreSQL 결과가 이 개수 이상이면 확장, 미만이면 폴백
-            use_plan_execution: Plan 실행 모드 사용 여부
             
         Returns:
-            검색 결과 리스트 (점수 순 정렬)
+            검색 결과 리스트 (RRF 가중치 점수 순)
         """
         if self.verbose:
-            print(f"\n🔍 Hybrid Search: '{query}'")
+            print(f"\n🔍 Option 4 Search: '{query}'")
         
-        # Step 0: Router Agent로 Intent 분석 & Plan 수립
-        router_result = None
-        if self.use_router and self.router and not category:
-            try:
-                router_result = self.router.route(query)
-                
-                # Plan의 query 필드에서 카테고리 접두사 제거 (후처리)
-                if "plan" in router_result and router_result["plan"]:
-                    for step in router_result["plan"]:
-                        if "query" in step:
-                            original_query = step["query"]
-                            # 카테고리 접두사 제거
-                            for prefix in ["MAP ", "MONSTER ", "NPC ", "ITEM "]:
-                                step["query"] = step["query"].replace(prefix, "")
-                
-                if self.verbose:
-                    print(f"   🧭 Intent: {router_result['intent']}")
-                    print(f"   📁 Categories: {router_result['categories']}")
-                
-                # Plan이 있고 Plan 실행 모드면 Plan 실행
-                if use_plan_execution and "plan" in router_result and router_result["plan"]:
-                    if self.verbose:
-                        print(f"   🚀 Plan 실행 모드 ({len(router_result['plan'])} steps)")
-                    return await self.execute_plan(query, router_result, limit)
-                
-                # Router가 제안한 첫 번째 category 사용
-                if router_result['categories']:
-                    category = router_result['categories'][0]
-                    if self.verbose:
-                        print(f"   ✅ Category 선택: {category}")
-            except Exception as e:
-                logger.warning(f"Router 실패, category 없이 진행: {e}")
-        
-        # Step 1: PostgreSQL 검색 (기존 로직)
-        pg_results = await self._postgres_search(query, category, limit)
+        # Step 1: LLM으로 키워드 추출 (초경량)
+        keywords = await self._extract_keywords_llm(query)
         
         if self.verbose:
-            print(f"   PostgreSQL: {len(pg_results)}개 결과")
+            print(f"   🔑 추출 키워드: {keywords}")
         
-        # Milvus 사용 안하면 PostgreSQL 결과만 반환
-        if not self.use_milvus or not self.milvus_searcher:
-            return pg_results[:limit]
+        # Step 2: 3개 DB 완전 병렬 실행
+        if self.verbose:
+            print(f"   ⚡ PostgreSQL + Milvus + Neo4j 완전 병렬...")
         
-        # Step 2: 결과 분기
-        if len(pg_results) >= pg_threshold:
-            # ✅ 충분히 찾음 → Milvus로 연관 확장
-            if self.verbose:
-                print(f"   ✅ PostgreSQL 성공 → Milvus 연관 검색")
-            
-            milvus_results = await self._milvus_expansion_search(pg_results, limit)
-            
-            if self.verbose:
-                print(f"   Milvus 확장: {len(milvus_results)}개 추가")
-            
-            # 병합 & 랭킹
-            merged = self._merge_results(pg_results, milvus_results, mode="expansion")
-            
-        else:
-            # ⚠️ 부족함 → Milvus로 의미 검색 (폴백)
-            if self.verbose:
-                print(f"   ⚠️ PostgreSQL 부족 ({len(pg_results)}/{pg_threshold}) → Milvus 의미 검색")
-            
-            milvus_results = await self._milvus_semantic_search(query, limit)
-            
-            if self.verbose:
-                print(f"   Milvus 의미: {len(milvus_results)}개 결과")
-            
-            # 병합 & 랭킹
-            merged = self._merge_results(pg_results, milvus_results, mode="fallback")
+        pg_task = self._search_by_keywords_pg(keywords, limit)
+        milvus_task = self._search_by_keywords_milvus(keywords, limit) if self.use_milvus else asyncio.sleep(0)
+        neo4j_task = self._search_by_keywords_neo4j(keywords, limit) if self.use_neo4j else asyncio.sleep(0)
         
-        # 최종 결과
-        final_results = merged[:limit]
+        pg_results, milvus_results, neo4j_results = await asyncio.gather(
+            pg_task, milvus_task, neo4j_task
+        )
+        
+        if not self.use_milvus:
+            milvus_results = []
+        if not self.use_neo4j:
+            neo4j_results = []
+        
+        if self.verbose:
+            print(f"   PostgreSQL: {len(pg_results)}개")
+            print(f"   Milvus: {len(milvus_results)}개")
+            print(f"   Neo4j: {len(neo4j_results)}개")
+        
+        # sources 필드 추가
+        for r in pg_results:
+            if "sources" not in r:
+                r["sources"] = ["PostgreSQL"]
+        for r in milvus_results:
+            if "sources" not in r:
+                r["sources"] = ["Milvus"]
+        for r in neo4j_results:
+            if "sources" not in r:
+                r["sources"] = ["Neo4j"]
+        
+        # Step 3: RRF 가중치 적용 (PG:1.0, Neo4j:0.8, Milvus:0.3)
+        results_by_source = {
+            "PostgreSQL": pg_results,
+            "Milvus": milvus_results,
+            "Neo4j": neo4j_results
+        }
+        
+        final_results = self._apply_rrf_weighted(
+            results_by_source,
+            weights={"PostgreSQL": 1.0, "Neo4j": 0.8, "Milvus": 0.3}
+        )[:limit]
         
         if self.verbose:
             print(f"   📊 최종: {len(final_results)}개\n")
@@ -1074,6 +1058,258 @@ class HybridSearcher:
         }
         
         return self._apply_rrf(results_by_source)
+    
+    async def _extract_keywords_llm(self, query: str) -> List[str]:
+        """
+        LLM으로 검색 키워드 3개 추출 (초경량)
+        """
+        if not self.router or not self.router.llm:
+            # Fallback: Kiwi 형태소 분석기 사용
+            return self._extract_keywords_kiwi(query)
+        
+        try:
+            prompt = f"""다음 질문에서 검색에 사용할 핵심 키워드 3개를 추출하세요.
+
+질문: {query}
+
+규칙:
+1. 고유명사 우선 (NPC, 몬스터, 아이템, 맵 이름)
+2. 동작/관계 키워드 포함 (구매, 판매, 위치, 전직 등)
+3. 정확히 3개 단어, 쉼표로 구분
+4. 예시: "커닝시티, NPC, 정착"
+
+키워드:"""
+            
+            response = await self.router.llm.ainvoke(prompt)
+            keywords_str = response.content.strip()
+            keywords = [k.strip() for k in keywords_str.split(",")][:3]
+            
+            # 최소 1개 보장
+            if not keywords:
+                keywords = self._extract_keywords_kiwi(query)
+            
+            return keywords
+            
+        except Exception as e:
+            logger.warning(f"LLM 키워드 추출 실패: {e}, Fallback 사용")
+            return self._extract_keywords_kiwi(query)
+    
+    def _extract_keywords_kiwi(self, query: str) -> List[str]:
+        """
+        Kiwi 형태소 분석기로 키워드 추출 (LLM 실패 시 fallback)
+        """
+        try:
+            from kiwipiepy import Kiwi
+            kiwi = Kiwi()
+            
+            # 고유명사(NNP, NNG) 추출
+            tokens = kiwi.tokenize(query)
+            keywords = []
+            
+            for token in tokens:
+                # 고유명사, 일반명사만
+                if token.tag in ['NNP', 'NNG'] and len(token.form) >= 2:
+                    keywords.append(token.form)
+            
+            # 최소 1개 보장
+            if not keywords:
+                keywords = [query]
+            
+            return keywords[:3]
+            
+        except Exception as e:
+            logger.warning(f"Kiwi 키워드 추출 실패: {e}, 원본 쿼리 사용")
+            return [query]
+    
+    async def _search_by_keywords_pg(self, keywords: List[str], limit: int) -> List[Dict[str, Any]]:
+        """
+        canonical_name으로 PostgreSQL 검색
+        """
+        results = []
+        
+        for keyword in keywords:
+            try:
+                # canonical_name으로 검색
+                stmt = select(MapleDictionary).filter(
+                    MapleDictionary.canonical_name.ilike(f"%{keyword}%")
+                ).limit(limit)
+                
+                result = await self.db.execute(stmt)
+                rows = result.scalars().all()
+                
+                for row in rows:
+                    results.append({
+                        "score": 100,  # 정확 매치
+                        "match_type": "pg_canonical",
+                        "data": {
+                            "category": row.category,
+                            "name": row.name,
+                            "canonical_name": row.canonical_name,
+                            "detail_data": row.detail_data
+                        }
+                    })
+            except Exception as e:
+                logger.warning(f"PG 키워드 검색 실패 ({keyword}): {e}")
+        
+        return results
+    
+    async def _search_by_keywords_milvus(self, keywords: List[str], limit: int) -> List[Dict[str, Any]]:
+        """
+        canonical_name으로 Milvus 검색
+        """
+        if not self.milvus_searcher:
+            return []
+        
+        results = []
+        
+        for keyword in keywords:
+            try:
+                # entity_name으로 필터링하여 검색 (top_k 파라미터 사용)
+                milvus_results = await self.milvus_searcher.search(
+                    query=keyword,
+                    top_k=limit
+                )
+                
+                for result in milvus_results:
+                    results.append({
+                        "score": result.get("score", 0) * 100,
+                        "match_type": "milvus_canonical",
+                        "sources": ["Milvus"],
+                        "data": result
+                    })
+            except Exception as e:
+                logger.warning(f"Milvus 키워드 검색 실패 ({keyword}): {e}")
+        
+        return results
+    
+    async def _search_by_keywords_neo4j(self, keywords: List[str], limit: int) -> List[Dict[str, Any]]:
+        """
+        canonical_name으로 Neo4j 관계 검색
+        """
+        if not self.neo4j_searcher:
+            return []
+        
+        results = []
+        
+        for keyword in keywords:
+            try:
+                # NPC 위치 (메서드명 단수형)
+                npc_results = await self.neo4j_searcher.find_npc_location(keyword)
+                for npc_loc in npc_results:
+                    results.append({
+                        "score": 90,
+                        "match_type": "neo4j_npc_location",
+                        "sources": ["Neo4j"],
+                        "data": {
+                            "npc": npc_loc.get("npc_name", ""),
+                            "map": npc_loc.get("map_name", ""),
+                            "relationship": f"{npc_loc.get('npc_name', '')} → {npc_loc.get('map_name', '')}"
+                        }
+                    })
+                
+                # 몬스터 위치
+                monster_results = await self.neo4j_searcher.find_monster_locations(keyword)
+                for monster_loc in monster_results:
+                    results.append({
+                        "score": 90,
+                        "match_type": "neo4j_monster_location",
+                        "sources": ["Neo4j"],
+                        "data": {
+                            "monster": monster_loc.get("monster_name", ""),
+                            "map": monster_loc.get("map_name", ""),
+                            "relationship": f"{monster_loc.get('monster_name', '')} → {monster_loc.get('map_name', '')}"
+                        }
+                    })
+                
+                # 아이템 드롭/판매
+                item_droppers = await self.neo4j_searcher.find_item_droppers(keyword)
+                for dropper in item_droppers:
+                    results.append({
+                        "score": 90,
+                        "match_type": "neo4j_item_drop",
+                        "sources": ["Neo4j"],
+                        "data": {
+                            "item": dropper.get("item_name", ""),
+                            "monster": dropper.get("monster_name", ""),
+                            "relationship": f"{dropper.get('item_name', '')} ← {dropper.get('monster_name', '')}"
+                        }
+                    })
+                
+                item_sellers = await self.neo4j_searcher.find_item_sellers(keyword)
+                for seller in item_sellers:
+                    results.append({
+                        "score": 90,
+                        "match_type": "neo4j_item_sell",
+                        "sources": ["Neo4j"],
+                        "data": {
+                            "item": seller.get("item_name", ""),
+                            "npc": seller.get("npc_name", ""),
+                            "relationship": f"{seller.get('item_name', '')} ← {seller.get('npc_name', '')}"
+                        }
+                    })
+                
+            except Exception as e:
+                logger.warning(f"Neo4j 키워드 검색 실패 ({keyword}): {e}")
+        
+        return results[:limit]
+    
+    def _apply_rrf_weighted(
+        self,
+        results_by_source: Dict[str, List[Dict[str, Any]]],
+        weights: Dict[str, float] = None,
+        k: int = 60
+    ) -> List[Dict[str, Any]]:
+        """
+        가중치 기반 RRF (Weighted Reciprocal Rank Fusion)
+        
+        Args:
+            results_by_source: {"PostgreSQL": [...], "Milvus": [...], "Neo4j": [...]}
+            weights: 각 소스별 가중치 (기본값: {"PostgreSQL": 1.0, "Neo4j": 0.8, "Milvus": 0.3})
+            k: RRF 상수
+        """
+        if weights is None:
+            weights = {"PostgreSQL": 1.0, "Neo4j": 0.8, "Milvus": 0.3}
+        
+        rrf_scores: Dict[str, float] = {}
+        result_map: Dict[str, Dict[str, Any]] = {}
+        
+        for source, results in results_by_source.items():
+            source_weight = weights.get(source, 1.0)
+            
+            for rank, result in enumerate(results, start=1):
+                # canonical_name 우선, 없으면 name
+                result_data = result.get("data", {})
+                canonical_name = result_data.get("canonical_name") or result_data.get("name", "")
+                
+                if not canonical_name:
+                    continue
+                
+                # RRF 점수 계산 (가중치 적용)
+                rrf_score = source_weight / (k + rank)
+                
+                if canonical_name in rrf_scores:
+                    rrf_scores[canonical_name] += rrf_score
+                    # sources 병합
+                    if "sources" not in result_map[canonical_name]:
+                        result_map[canonical_name]["sources"] = []
+                    if source not in result_map[canonical_name]["sources"]:
+                        result_map[canonical_name]["sources"].append(source)
+                else:
+                    rrf_scores[canonical_name] = rrf_score
+                    result_map[canonical_name] = result.copy()
+                    result_map[canonical_name]["sources"] = result.get("sources", [source])
+        
+        # RRF 점수로 정렬
+        sorted_names = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        
+        final_results = []
+        for canonical_name, rrf_score in sorted_names:
+            result = result_map[canonical_name]
+            result["rrf_score"] = rrf_score
+            result["score"] = rrf_score * 100  # 점수 정규화
+            final_results.append(result)
+        
+        return final_results
 
 
 # 편의 함수

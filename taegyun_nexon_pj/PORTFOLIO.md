@@ -143,4 +143,4 @@ Perfect for roles requiring:
 ---
 
 **View Code**: [GitHub Repository](#)
-**Contact**: taegyun.kim@example.com
+**Contact**: bboing0318@gmail.com

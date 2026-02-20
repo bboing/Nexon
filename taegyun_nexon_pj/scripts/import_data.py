@@ -28,8 +28,9 @@ else:
 
 # 이제 database 모듈 임포트 가능
 from sqlalchemy.orm import Session
-from database.session import SessionLocal
+from database.session import SessionLocal, engine
 from database.models.maple_dictionary import MapleDictionary, CategoryEnum
+from database.base import Base
 
 # 존재하는 DTO들만 임포트
 from database.schemas.map_dto import MapMetadata
@@ -60,6 +61,11 @@ def import_maple_data(file_path: str):
     Args:
         file_path: JSON 파일 경로
     """
+    # ✅ 테이블 생성 (없으면 생성)
+    print("📋 테이블 생성 중...")
+    Base.metadata.create_all(bind=engine)
+    print(f"   ✅ 테이블: {list(Base.metadata.tables.keys())}")
+    
     with open(file_path, "r", encoding="utf-8") as f:
         json_data = json.load(f)
 

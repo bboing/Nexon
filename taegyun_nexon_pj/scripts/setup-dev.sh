@@ -69,7 +69,7 @@ fi
 
 # 3️⃣ 인프라 가동 (Docker Compose)
 echo -e "\n3️⃣ Docker 컨테이너 가동..."
-docker-compose -f "${ROOT_DIR}/docker-compose.yml" up -d --build
+docker-compose -f "${ROOT_DIR}/docker-compose.yml" up -d
 
 wait_for_service "localhost" 5432 "Postgres"
 wait_for_service "localhost" 7687 "Neo4j"
@@ -96,7 +96,7 @@ echo -e "\n5️⃣ 데이터 지식 구조화 시작..."
 echo "   [1/3] Postgres 데이터 임포트..."
 python3 "${ROOT_DIR}/scripts/import_data.py" "${ROOT_DIR}/training/data/input_data/maple_data.json"
 
-echo "   [2/3] Milvus 벡터 인덱싱..."
+echo "   [2/3] Milvus 벡터 인덱싱 (기존 데이터 clear 후 재구축)..."
 python3 "${ROOT_DIR}/scripts/sync_to_milvus.py" --drop
 
 echo "   [3/3] Neo4j 그래프 관계 구축..."
@@ -136,7 +136,7 @@ echo -e "   ┌────────────┬────────�
 echo -e "   │ Service    │ Endpoint                    │ Credentials                    │"
 echo -e "   ├────────────┼─────────────────────────────┼────────────────────────────────┤"
 echo -e "   │ PostgreSQL │ localhost:5432              │ .env 설정 참조                 │"
-echo -e "   │ Milvus UI  │ http://localhost:8081       │ minioadmin / nexonJjang67!     │"
+echo -e "   │ Milvus UI  │ http://localhost:8000       │ minioadmin / nexonJjang67!     │"
 echo -e "   │ Neo4j UI   │ http://localhost:7474       │ neo4j / nexonJjang67!          │"
 echo -e "   └────────────┴─────────────────────────────┴────────────────────────────────┘"
 echo -e "   * 상세 접속 정보는 프로젝트 루트의 .env 파일에서 관리됩니다."

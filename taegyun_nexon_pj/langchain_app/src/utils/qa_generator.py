@@ -1,6 +1,6 @@
 """
 Q&A 생성기
-PostgreSQL 데이터 → 질문+답변 쌍 생성 (템플릿 기반, 할루시네이션 없음)
+PostgreSQL 데이터 → 질문+답변 쌍 생성 (템플릿 기반, 할루시네이션 제거)
 """
 from typing import List, Dict, Any
 import logging

@@ -52,7 +52,7 @@ class Neo4jConnection:
         """Neo4j Session 반환"""
         if self._driver is None:
             self._initialize_driver()
-        return self._driver.session()
+        return self._driver.session(database="neo4j")
     
     def close(self):
         """연결 종료"""
@@ -133,7 +133,7 @@ class AsyncNeo4jConnection:
         """Neo4j Async Session 반환"""
         if self._driver is None:
             self._initialize_driver()
-        return self._driver.session()
+        return self._driver.session(database="neo4j")
     
     async def close(self):
         """연결 종료"""

@@ -1,5 +1,6 @@
 """
 Kiwi 형태소 분석 기반 키워드 추출 + 동의어 치환 (Async)
+Router Fallback용
 """
 from typing import List, Dict, Set
 from sqlalchemy.ext.asyncio import AsyncSession

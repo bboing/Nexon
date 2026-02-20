@@ -1,8 +1,14 @@
 """
-Hybrid Search with Intent-based Routing (Async)
-Router Agent → Category 우선순위 결정 → PostgreSQL/Milvus 검색
-+ Plan Execution: Multi-step 검색 전략 실행
-+ Kiwi 형태소 분석 기반 키워드 추출
+Hybrid Search - Option 3: Intent 기반 조건부 병렬 (Async)
+
+전략:
+1. RouterAgent로 Intent만 분류 (Plan X)
+2. PostgreSQL + Milvus 항상 병렬
+3. 관계 Intent면 Neo4j도 병렬
+4. RRF 병합
+
+장점: 정확도 높음, 비동기 최적 활용
+단점: Intent 분류 필요
 """
 from typing import List, Dict, Any, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -95,107 +101,200 @@ class HybridSearcher:
             logger.warning(f"⚠️ Kiwi 초기화 실패, 기존 방식 사용: {e}")
             self.keyword_extractor = None
     
+    # 관계 필요한 Intent 정의
+    RELATION_INTENTS = {
+        "npc_location", "item_drop", "monster_location",
+        "item_purchase", "class_change", "map_connection"
+    }
+    
     async def search(
         self,
         query: str,
         category: Optional[str] = None,
-        limit: int = 10,
-        pg_threshold: int = 3,
-        use_plan_execution: bool = True
+        limit: int = 10
     ) -> List[Dict[str, Any]]:
         """
-        Intent 기반 하이브리드 검색 + Plan Execution
+        Option 3: Intent 기반 조건부 병렬
+        
+        전략:
+        1. Intent 분류 (가볍게)
+        2. PostgreSQL + Milvus 항상 병렬
+        3. 관계 Intent면 Neo4j도 병렬
+        4. RRF 병합
         
         Args:
             query: 검색 쿼리
-            category: 카테고리 필터 (옵션, Router가 자동 결정)
+            category: 카테고리 필터 (미사용)
             limit: 최대 결과 개수
-            pg_threshold: PostgreSQL 결과가 이 개수 이상이면 확장, 미만이면 폴백
-            use_plan_execution: Plan 실행 모드 사용 여부
             
         Returns:
-            검색 결과 리스트 (점수 순 정렬)
+            검색 결과 리스트 (RRF 점수 순)
         """
         if self.verbose:
-            print(f"\n🔍 Hybrid Search: '{query}'")
+            print(f"\n🔍 Option 3 Search: '{query}'")
         
-        # Step 0: Router Agent로 Intent 분석 & Plan 수립
-        router_result = None
-        if self.use_router and self.router and not category:
-            try:
-                router_result = self.router.route(query)
-                
-                # Plan의 query 필드에서 카테고리 접두사 제거 (후처리)
-                if "plan" in router_result and router_result["plan"]:
-                    for step in router_result["plan"]:
-                        if "query" in step:
-                            original_query = step["query"]
-                            # 카테고리 접두사 제거
-                            for prefix in ["MAP ", "MONSTER ", "NPC ", "ITEM "]:
-                                step["query"] = step["query"].replace(prefix, "")
-                
-                if self.verbose:
-                    print(f"   🧭 Intent: {router_result['intent']}")
-                    print(f"   📁 Categories: {router_result['categories']}")
-                
-                # Plan이 있고 Plan 실행 모드면 Plan 실행
-                if use_plan_execution and "plan" in router_result and router_result["plan"]:
-                    if self.verbose:
-                        print(f"   🚀 Plan 실행 모드 ({len(router_result['plan'])} steps)")
-                    return await self.execute_plan(query, router_result, limit)
-                
-                # Router가 제안한 첫 번째 category 사용
-                if router_result['categories']:
-                    category = router_result['categories'][0]
-                    if self.verbose:
-                        print(f"   ✅ Category 선택: {category}")
-            except Exception as e:
-                logger.warning(f"Router 실패, category 없이 진행: {e}")
-        
-        # Step 1: PostgreSQL 검색 (기존 로직)
-        pg_results = await self._postgres_search(query, category, limit)
+        # Step 1: Intent 분류 (가볍게)
+        intent = await self._classify_intent(query)
         
         if self.verbose:
-            print(f"   PostgreSQL: {len(pg_results)}개 결과")
+            print(f"   🧭 Intent: {intent}")
         
-        # Milvus 사용 안하면 PostgreSQL 결과만 반환
-        if not self.use_milvus or not self.milvus_searcher:
-            return pg_results[:limit]
+        # Step 2: PostgreSQL + Milvus 항상 병렬
+        pg_task = self._postgres_search(query, None, limit)
+        milvus_task = self._milvus_semantic_search(query, limit) if self.use_milvus else asyncio.sleep(0)
         
-        # Step 2: 결과 분기
-        if len(pg_results) >= pg_threshold:
-            # ✅ 충분히 찾음 → Milvus로 연관 확장
-            if self.verbose:
-                print(f"   ✅ PostgreSQL 성공 → Milvus 연관 검색")
-            
-            milvus_results = await self._milvus_expansion_search(pg_results, limit)
+        # Step 3: 관계 Intent면 Neo4j도 병렬
+        if intent in self.RELATION_INTENTS and self.use_neo4j and self.neo4j_searcher:
+            neo4j_task = self._neo4j_simple_search(query, limit)
             
             if self.verbose:
-                print(f"   Milvus 확장: {len(milvus_results)}개 추가")
+                print(f"   ⚡ PostgreSQL + Milvus + Neo4j 병렬 실행...")
             
-            # 병합 & 랭킹
-            merged = self._merge_results(pg_results, milvus_results, mode="expansion")
-            
+            pg_results, milvus_results, neo4j_results = await asyncio.gather(
+                pg_task, milvus_task, neo4j_task
+            )
         else:
-            # ⚠️ 부족함 → Milvus로 의미 검색 (폴백)
             if self.verbose:
-                print(f"   ⚠️ PostgreSQL 부족 ({len(pg_results)}/{pg_threshold}) → Milvus 의미 검색")
+                print(f"   ⚡ PostgreSQL + Milvus 병렬 실행...")
             
-            milvus_results = await self._milvus_semantic_search(query, limit)
-            
-            if self.verbose:
-                print(f"   Milvus 의미: {len(milvus_results)}개 결과")
-            
-            # 병합 & 랭킹
-            merged = self._merge_results(pg_results, milvus_results, mode="fallback")
+            pg_results, milvus_results = await asyncio.gather(pg_task, milvus_task)
+            neo4j_results = []
         
-        # 최종 결과
-        final_results = merged[:limit]
+        if not self.use_milvus:
+            milvus_results = []
+        
+        if self.verbose:
+            print(f"   PostgreSQL: {len(pg_results)}개")
+            print(f"   Milvus: {len(milvus_results)}개")
+            print(f"   Neo4j: {len(neo4j_results)}개")
+        
+        # sources 필드 추가
+        for r in pg_results:
+            if "sources" not in r:
+                r["sources"] = ["PostgreSQL"]
+        for r in milvus_results:
+            if "sources" not in r:
+                r["sources"] = ["Milvus"]
+        for r in neo4j_results:
+            if "sources" not in r:
+                r["sources"] = ["Neo4j"]
+        
+        # Step 4: RRF 병합
+        results_by_source = {
+            "PostgreSQL": pg_results,
+            "Milvus": milvus_results,
+            "Neo4j": neo4j_results
+        }
+        
+        final_results = self._apply_rrf(results_by_source)[:limit]
         
         if self.verbose:
             print(f"   📊 최종: {len(final_results)}개\n")
         
         return final_results
+    
+    async def _classify_intent(self, query: str) -> str:
+        """
+        가벼운 Intent 분류 (Plan 생성 X)
+        
+        Plan 대비 10배 빠름:
+        - Plan: 500 토큰 생성
+        - Intent: 10 토큰 생성
+        """
+        if not self.router:
+            return "general"
+        
+        try:
+            # 간단한 Intent 분류 프롬프트
+            prompt = f"""다음 질문의 Intent를 1단어로만 답하세요:
+
+class_change: 전직, 직업 변경
+npc_location: NPC 어디 있는지
+item_drop: 아이템 드랍, 누가 떨구는지
+monster_location: 몬스터 어디 있는지
+item_purchase: 아이템 구매, 누가 파는지
+map_connection: 맵 이동, 가는 법
+general: 일반 정보
+
+질문: {query}
+Intent:"""
+            
+            from langchain_core.messages import HumanMessage
+            response = await self.router.llm.ainvoke([HumanMessage(content=prompt)])
+            intent = response.content.strip().lower().replace("_", "_")
+            
+            # 유효한 Intent만 반환
+            valid_intents = [
+                "class_change", "npc_location", "item_drop",
+                "monster_location", "item_purchase", "map_connection", "general"
+            ]
+            
+            return intent if intent in valid_intents else "general"
+            
+        except Exception as e:
+            logger.warning(f"Intent 분류 실패: {e}")
+            return "general"
+    
+    async def _neo4j_simple_search(
+        self,
+        query: str,
+        limit: int
+    ) -> List[Dict[str, Any]]:
+        """
+        Neo4j 간단 검색 (모든 관계 유형 시도)
+        """
+        if not self.neo4j_searcher:
+            return []
+        
+        keywords = await self._extract_keywords(query)
+        results = []
+        
+        for keyword in keywords[:2]:  # 상위 2개 키워드만
+            try:
+                # NPC 위치
+                npc_loc = await self.neo4j_searcher.find_npc_location(keyword)
+                for r in npc_loc:
+                    results.append({
+                        "score": 85,
+                        "match_type": "neo4j_npc_location",
+                        "sources": ["Neo4j"],
+                        "data": {"canonical_name": r.get("map_name"), "id": r.get("map_id"), "category": "MAP"}
+                    })
+                
+                # 몬스터 위치
+                mon_loc = await self.neo4j_searcher.find_monster_locations(keyword)
+                for r in mon_loc:
+                    results.append({
+                        "score": 85,
+                        "match_type": "neo4j_monster_location",
+                        "sources": ["Neo4j"],
+                        "data": {"canonical_name": r.get("map_name"), "id": r.get("map_id"), "category": "MAP"}
+                    })
+                
+                # 아이템 드랍
+                droppers = await self.neo4j_searcher.find_item_droppers(keyword)
+                for r in droppers:
+                    results.append({
+                        "score": 85,
+                        "match_type": "neo4j_item_drop",
+                        "sources": ["Neo4j"],
+                        "data": {"canonical_name": r.get("monster_name"), "id": r.get("monster_id"), "category": "MONSTER"}
+                    })
+                
+                # 아이템 판매 NPC
+                sellers = await self.neo4j_searcher.find_item_sellers(keyword)
+                for r in sellers:
+                    results.append({
+                        "score": 85,
+                        "match_type": "neo4j_item_seller",
+                        "sources": ["Neo4j"],
+                        "data": {"canonical_name": r.get("npc_name"), "id": r.get("npc_id"), "category": "NPC"}
+                    })
+                
+            except Exception as e:
+                logger.warning(f"Neo4j 검색 실패 ({keyword}): {e}")
+        
+        return results[:limit]
     
     async def execute_plan(
         self,
@@ -1045,6 +1144,7 @@ class HybridSearcher:
                 formatted_results.append({
                     "score": result.get("score", 0) * 100,  # 점수 조정
                     "match_type": "milvus_semantic",
+                    "sources": ["Milvus"],  # sources 필드 추가
                     "data": result
                 })
             

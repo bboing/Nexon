@@ -4,7 +4,23 @@ Groq API 기반 하이브리드 RAG 데모 앱
 
 ## 실행 방법
 
-### 1. 의존성 설치
+### 🐳 방법 1: Docker Compose (권장)
+
+```bash
+# 프로젝트 루트에서
+cd ..
+docker-compose up -d streamlit-app
+
+# 로그 확인
+docker-compose logs -f streamlit-app
+
+# 접속
+open http://localhost:8501
+```
+
+### 💻 방법 2: 로컬 실행 (개발용)
+
+#### 1. 의존성 설치
 
 ```bash
 # 가상환경 활성화
@@ -16,7 +32,7 @@ pip install -r requirements.txt
 cd streamlit_app
 ```
 
-### 2. 환경 설정
+#### 2. 환경 설정
 
 `.env` 파일이 상위 디렉토리에 있어야 합니다:
 
@@ -34,9 +50,12 @@ NEO4J_PASSWORD=nexonJjang67!neo4j
 
 MILVUS_HOST=localhost
 MILVUS_PORT=19530
+
+# Groq API Key (선택사항 - UI에서도 입력 가능)
+GROQ_API_KEY=gsk_...
 ```
 
-### 3. 서비스 시작
+#### 3. 서비스 시작
 
 Docker 서비스들이 실행 중이어야 합니다:
 
@@ -45,7 +64,7 @@ Docker 서비스들이 실행 중이어야 합니다:
 docker-compose up -d
 ```
 
-### 4. Streamlit 실행
+#### 4. Streamlit 실행
 
 ```bash
 # streamlit_app 디렉토리에서
@@ -53,6 +72,8 @@ streamlit run app.py
 ```
 
 브라우저에서 `http://localhost:8501` 접속
+
+---
 
 ## Groq API Key 발급
 

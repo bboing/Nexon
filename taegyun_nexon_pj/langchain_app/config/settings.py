@@ -21,7 +21,11 @@ class Settings(BaseSettings):
     """애플리케이션 설정"""
     # Ollama 설정
     OLLAMA_BASE_URL: str
-    OLLAMA_MODEL: str 
+    OLLAMA_MODEL: str
+    
+    # Groq 설정 (Ollama fallback용)
+    GROQ_API_KEY: Optional[str] = None
+    GROQ_MODEL_NAME: Optional[str] = None 
     
     # PostgreSQL 설정 (BIZ_POSTGRES_* 사용)
     BIZ_POSTGRES_HOST: str
@@ -84,6 +88,9 @@ class Settings(BaseSettings):
     
     # 임베딩 모델
     embedding_model: str = "sentence-transformers/all-MiniLM-L6-v2"
+
+    # 리랭커
+    RERANKER_API_URL: str
     
     @property
     def postgres_url(self) -> str:

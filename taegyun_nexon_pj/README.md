@@ -7,7 +7,8 @@
 ```
 taegyun_nexon_pj/
 ├── requirements.txt              # 🔥 통합 의존성 (여기서 설치!)
-├── docker-compose.yml            # 인프라 정의
+├── docker-compose.yml            # 로컬 개발용 (FastAPI + 호스트 Ollama)
+├── docker-compose.prod.yml       # 포트폴리오용 (Streamlit + Docker Ollama)
 ├── .env                          # 환경 변수
 │
 ├── langchain_app/                # RAG 엔진 (코어 로직)
@@ -36,58 +37,107 @@ taegyun_nexon_pj/
 
 ## 빠른 시작
 
-### 1. 의존성 설치
+두 가지 실행 모드를 지원합니다:
+
+### 🔧 모드 1: 로컬 개발 환경 (FastAPI + 호스트 Ollama)
+
+로컬에서 개발/테스트할 때 사용합니다.
+
+#### 1-1. 의존성 설치
 
 ```bash
 # 가상환경 생성 및 활성화
 python3 -m venv nexon_venv
 source nexon_venv/bin/activate
 
-# 🔥 통합 의존성 설치 (최상위 requirements.txt)
+# 통합 의존성 설치
 pip install -r requirements.txt
 ```
 
-### 2. 인프라 시작
+#### 1-2. Ollama 설치 및 모델 다운로드 (macOS 호스트)
 
 ```bash
-# Docker 서비스 시작 (PostgreSQL, Milvus, Neo4j, Redis 등)
+# Ollama 설치 (https://ollama.com/)
+brew install ollama
+
+# Ollama 서버 시작
+ollama serve
+
+# 모델 다운로드 (새 터미널)
+ollama pull llama3.1:8b
+```
+
+#### 1-3. 인프라 시작
+
+```bash
+# 인프라 + FastAPI 실행
 docker-compose up -d
 
 # 상태 확인
 docker-compose ps
 ```
 
-### 3. 데이터베이스 초기화
+#### 1-4. 데이터베이스 초기화
 
 ```bash
-# 자동 초기화 스크립트 실행
-bash scripts/setup.sh
+# 로컬 개발용 자동 초기화 스크립트 실행
+bash scripts/setup-dev.sh
 ```
 
 이 스크립트는:
+- `docker-compose.yml` 실행 (인프라 + FastAPI)
 - PostgreSQL에 데이터 import
 - Milvus에 벡터 동기화
 - Neo4j에 관계 그래프 구축
 
-### 4-A. Streamlit 데모 실행 (Groq API)
+#### 1-5. FastAPI 접속
+
+API 문서: `http://localhost:8000/docs`
+
+---
+
+### 🎯 모드 2: 포트폴리오 데모 환경 (Streamlit + Docker Ollama)
+
+포트폴리오 제출 또는 독립 실행할 때 사용합니다.
+
+#### 2-1. 환경 변수 설정
 
 ```bash
-cd streamlit_app
-streamlit run app.py
+# .env 파일에 Groq API Key 추가
+GROQ_API_KEY=gsk_your_key_here
+GROQ_MODEL_NAME=llama-3.3-70b-versatile
 ```
-
-브라우저에서 `http://localhost:8501` 접속
 
 **Groq API Key 발급**: https://console.groq.com/
 
-### 4-B. FastAPI 서버 실행 (Ollama)
+#### 2-2. 인프라 + Streamlit 실행
 
 ```bash
-cd langchain_app
-uvicorn main:app --reload --port 8000
+# docker-compose.prod.yml 사용
+docker-compose -f docker-compose.prod.yml up -d
+
+# 상태 확인
+docker-compose -f docker-compose.prod.yml ps
 ```
 
-API 문서: `http://localhost:8000/docs`
+#### 2-3. 데이터베이스 초기화
+
+```bash
+# 포트폴리오용 자동 초기화 스크립트 실행
+bash scripts/setup-prod.sh
+```
+
+이 스크립트는:
+- `docker-compose.prod.yml` 실행 (인프라 + Streamlit)
+- PostgreSQL에 데이터 import
+- Milvus에 벡터 동기화
+- Neo4j에 관계 그래프 구축
+
+#### 2-4. Streamlit 앱 접속
+
+브라우저에서 `http://localhost:8501` 접속
+
+> **참고**: 포트폴리오 모드는 **Groq API만** 사용하므로 Ollama 설치가 필요 없습니다.
 
 ## 의존성 관리 ⚠️
 
@@ -170,6 +220,9 @@ MILVUS_PORT=19530
 
 # Ollama (로컬 LLM)
 OLLAMA_BASE_URL=http://localhost:11434
+
+# Groq API (Streamlit 데모용 - 선택사항)
+# GROQ_API_KEY=gsk_...  # UI에서도 입력 가능
 ```
 
 ## 테스트 질문 예시

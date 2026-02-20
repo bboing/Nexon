@@ -26,7 +26,7 @@ def render_chat_interface(rag_service):
                 display_sources(message["sources"], message["search_results"])
     
     # 사용자 입력
-    if prompt := st.chat_input("무엇이 궁금하신가요? (예: 도적 전직 방법)"):
+    if prompt := st.chat_input("무엇이 궁금하신가요? (예: 아이스진은 어디서 얻을 수 있어?)"):
         # 사용자 메시지 추가
         st.session_state.messages.append({
             "role": "user",

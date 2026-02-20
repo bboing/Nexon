@@ -1,10 +1,9 @@
 """
 Answer Generator - 검색 결과를 자연어 답변으로 생성
 """
-from typing import List, Dict, Any, Optional
-from langchain_ollama import ChatOllama
+from typing import List, Dict, Any
 from langchain_core.messages import HumanMessage, SystemMessage
-from config.settings import settings
+from src.models.llm import create_llm, switch_to_groq
 from .schema_guide import SCHEMA_GUIDE
 import logging
 
@@ -26,7 +25,7 @@ class AnswerGenerator:
 [역할]
 - 검색 결과를 바탕으로 사용자 질문에 정확하게 답변합니다.
 - 검색된 정보만 사용하며, 없는 정보는 지어내지 않습니다.
-- 친절하고 자연스러운 한국어로 답변합니다.
+- **반드시 한국어로만 답변합니다. 일본어, 영어 등 다른 언어 사용 금지.**
 
 {SCHEMA_GUIDE}
 
@@ -57,15 +56,17 @@ class AnswerGenerator:
 
     def __init__(
         self,
-        llm: Optional[ChatOllama] = None,
-        verbose: bool = False
+        llm=None,
+        verbose: bool = False,
     ):
-        self.llm = llm or ChatOllama(
-            model="hf.co/bartowski/google_gemma-3-12b-it-GGUF:Q4_K_M",
-            base_url=settings.OLLAMA_BASE_URL,
-            temperature=0.3  # 약간의 창의성 허용
-        )
+        self.llm = llm if llm else create_llm(temperature=0.3)
         self.verbose = verbose
+
+    def _switch_to_groq(self):
+        """Runtime에 Ollama 실패 시 Groq으로 전환"""
+        result = switch_to_groq(temperature=0.3)
+        if result:
+            self.llm = result
     
     async def generate(
         self,
@@ -142,6 +143,27 @@ class AnswerGenerator:
             
         except Exception as e:
             logger.error(f"답변 생성 실패: {e}")
+            # Ollama Runtime 에러 시 Groq으로 전환 후 재시도
+            if "not found" in str(e) or "404" in str(e) or "Connection" in str(e):
+                self._switch_to_groq()
+                try:
+                    messages = [
+                        SystemMessage(content=self.SYSTEM_PROMPT),
+                        HumanMessage(content=prompt)
+                    ]
+                    response = await self.llm.ainvoke(messages)
+                    answer = response.content.strip()
+                    sources = self._extract_sources(search_results[:max_context_items])
+                    confidence = self._calculate_confidence(search_results[:max_context_items])
+                    
+                    return {
+                        "answer": answer,
+                        "sources": sources,
+                        "confidence": confidence
+                    }
+                except Exception as retry_error:
+                    logger.error(f"Groq 재시도도 실패: {retry_error}")
+            
             return {
                 "answer": f"답변 생성 중 오류가 발생했습니다: {str(e)}",
                 "sources": [],

@@ -105,52 +105,35 @@ async def ask_question(
 ):
     """
     Q&A 엔드포인트 (Async)
-    
-    하이브리드 검색 + LLM 답변 생성
-    
+
+    RAG Chain을 통해 하이브리드 검색 + LLM 답변 생성
+
     Args:
         request: 질문 요청 (question, category, limit, use_plan_execution)
         db: 비동기 DB 세션
-        
+
     Returns:
         QuestionResponse: 답변, 출처, 신뢰도, 검색 결과
     """
     try:
-        from src.retrievers.hybrid_searcher import HybridSearcher
-        from src.generators.answer_generator import AnswerGenerator
-        
-        # 1. Hybrid Search
-        searcher = HybridSearcher(
-            db=db,
-            use_milvus=True,
-            use_neo4j=True,
-            use_router=True,
-            verbose=False
-        )
-        
-        search_results = await searcher.search(
+        from src.chains.rag_chain import MapleRAGChain
+
+        chain = MapleRAGChain(db=db, use_milvus=True, use_neo4j=True)
+        result = await chain.ainvoke(
             query=request.question,
             category=request.category,
             limit=request.limit,
-            use_plan_execution=request.use_plan_execution
+            use_plan_execution=request.use_plan_execution,
         )
-        
-        # 2. Answer Generation
-        generator = AnswerGenerator(verbose=False)
-        result = await generator.generate(
-            query=request.question,
-            search_results=search_results,
-            max_context_items=5
-        )
-        
+
         return QuestionResponse(
             question=request.question,
             answer=result["answer"],
             sources=result["sources"],
             confidence=result["confidence"],
-            search_results=search_results[:5]  # 상위 5개만 반환
+            search_results=result["search_results"],
         )
-        
+
     except Exception as e:
         logger.error(f"Q&A 엔드포인트 오류: {e}")
         raise HTTPException(status_code=500, detail=str(e))
