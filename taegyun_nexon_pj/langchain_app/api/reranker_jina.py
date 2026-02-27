@@ -6,8 +6,13 @@ import uvicorn
 
 app = FastAPI(title="Local Jina Reranker (MPS)")
 
-# 1. 맥 GPU(MPS) 사용 설정
-device = "mps" if torch.backends.mps.is_available() else "cpu"
+# 1. GPU 디바이스 우선순위: MPS(Mac) > CUDA(NVIDIA) > CPU
+if torch.backends.mps.is_available():
+    device = "mps"
+elif torch.cuda.is_available():
+    device = "cuda"
+else:
+    device = "cpu"
 print(f"🚀 Using Device: {device}")
 
 # 2. Jina Reranker v2 모델 로드

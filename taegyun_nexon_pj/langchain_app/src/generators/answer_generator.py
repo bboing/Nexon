@@ -355,12 +355,10 @@ class AnswerGenerator:
     
     def _calculate_confidence(self, search_results: List[Dict[str, Any]]) -> float:
         """
-        신뢰도 계산 (평균 점수)
+        신뢰도 계산 (최고 점수 기준)
+        - 평균 대신 최고 점수를 사용해 Milvus 노이즈 결과가 신뢰도를 끌어내리는 문제 방지
         """
         if not search_results:
             return 0.0
-        
-        total_score = sum(r.get("score", 0) for r in search_results)
-        avg_score = total_score / len(search_results)
-        
-        return min(avg_score, 100.0)  # 최대 100%
+
+        return min(max(r.get("score", 0) for r in search_results), 100.0)

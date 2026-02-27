@@ -13,7 +13,7 @@ LANGCHAIN_DIR = Path(__file__).parent.parent.parent / "langchain_app"
 sys.path.insert(0, str(LANGCHAIN_DIR))
 
 from database.session import get_async_db
-from src.retrievers.hybrid_searcher_hop import HybridSearcher
+from src.retrievers.hybrid_searcher_fin import HybridSearcher
 from src.generators.answer_generator import AnswerGenerator
 
 
@@ -96,9 +96,12 @@ class MapleRAGService:
             )
             
             # 3. 결과 반환
+            router_info = getattr(searcher, "last_router_result", {})
             return {
                 "answer": answer_result["answer"],
                 "sources": answer_result["sources"],
                 "confidence": answer_result["confidence"],
-                "search_results": search_results
+                "search_results": search_results,
+                "entities": router_info.get("entities", []),
+                "sentences": router_info.get("sentences", []),
             }

@@ -23,7 +23,13 @@ def render_chat_interface(rag_service):
             
             # 어시스턴트 메시지면 출처 표시
             if message["role"] == "assistant" and "sources" in message:
-                display_sources(message["sources"], message["search_results"])
+                display_sources(
+                    message["sources"],
+                    message["search_results"],
+                    entities=message.get("entities", []),
+                    sentences=message.get("sentences", []),
+                    query=message.get("query", ""),
+                )
     
     # 사용자 입력
     if prompt := st.chat_input("무엇이 궁금하신가요? (예: 아이스진은 어디서 얻을 수 있어?)"):
@@ -50,15 +56,24 @@ def render_chat_interface(rag_service):
                     st.markdown(result["answer"])
                     
                     # 출처 표시
-                    display_sources(result["sources"], result["search_results"])
-                    
+                    display_sources(
+                        result["sources"],
+                        result["search_results"],
+                        entities=result.get("entities", []),
+                        sentences=result.get("sentences", []),
+                        query=prompt,
+                    )
+
                     # 메시지 히스토리 저장
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": result["answer"],
                         "sources": result["sources"],
                         "search_results": result["search_results"],
-                        "confidence": result["confidence"]
+                        "confidence": result["confidence"],
+                        "entities": result.get("entities", []),
+                        "sentences": result.get("sentences", []),
+                        "query": prompt,
                     })
                     
                 except Exception as e:

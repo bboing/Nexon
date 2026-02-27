@@ -5,13 +5,16 @@ Source Display Component
 import streamlit as st
 
 
-def display_sources(sources: list, search_results: list):
+def display_sources(sources: list, search_results: list, entities: list = None, sentences: list = None, query: str = ""):
     """
     검색 출처 및 결과 표시
-    
+
     Args:
         sources: 사용된 데이터 소스 리스트 (["PostgreSQL", "Milvus", "Neo4j"])
         search_results: 검색 결과 상세
+        entities: Router가 추출한 키워드 (명사)
+        sentences: Router가 추출한 문장 (동사구)
+        query: 원본 사용자 쿼리
     """
     with st.expander("🔍 답변 근거 (Retrieval Sources)", expanded=False):
         # 데이터 소스 표시
@@ -30,7 +33,39 @@ def display_sources(sources: list, search_results: list):
                     st.write(f"📁 {source}")
         
         st.divider()
-        
+
+        # 🔎 쿼리 분석 정보
+        st.markdown("#### 🔎 쿼리 분석")
+        col1, col2 = st.columns(2)
+
+        with col1:
+            st.markdown("**추출 키워드 (Entities)**")
+            if entities:
+                st.code(", ".join(entities))
+            else:
+                st.caption("없음")
+
+        with col2:
+            st.markdown("**검색 문장 (Sentences)**")
+            if sentences:
+                st.code(", ".join(sentences))
+            else:
+                st.caption(f"(없음 → 원문 사용: {query})" if query else "없음")
+
+        st.divider()
+
+        # canonical_name 목록
+        if search_results:
+            canonical_names = [
+                r.get("data", {}).get("canonical_name", "")
+                for r in search_results[:5]
+                if r.get("data", {}).get("canonical_name")
+            ]
+            if canonical_names:
+                st.markdown("**검색된 Canonical Names**")
+                st.code(" | ".join(canonical_names))
+            st.divider()
+
         # 검색 결과 상세
         if search_results:
             st.markdown("#### 📝 검색된 항목")

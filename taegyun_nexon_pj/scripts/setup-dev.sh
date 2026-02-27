@@ -42,14 +42,21 @@ echo -e "\n1️⃣ 시스템 환경 확인 중..."
 if ! command -v python3 &> /dev/null; then echo "❌ Python3 미설치"; exit 1; fi
 if ! command -v docker &> /dev/null; then echo "❌ Docker 미설치"; exit 1; fi
 
-# Docker 실행 여부 확인 및 Mac 자동 실행
+# Docker 실행 여부 확인
 if ! docker info &> /dev/null; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "   🐳 Docker Desktop 실행 중..."
+        echo "   🐳 Docker Desktop 실행 중... (macOS)"
         open -a Docker
         sleep 20
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "   ❌ Docker가 실행 중이지 않습니다. (Linux)"
+        echo "   👉 아래 명령어로 Docker를 시작하세요:"
+        echo "      sudo systemctl start docker"
+        exit 1
     else
-        echo "   ❌ Docker가 실행 중이지 않습니다."; exit 1
+        echo "   ❌ Docker가 실행 중이지 않습니다."
+        echo "   👉 Windows 사용자: Docker Desktop을 먼저 실행하고 WSL2 터미널에서 재시도하세요."
+        exit 1
     fi
 fi
 echo "   ✅ Python & Docker 준비 완료"
@@ -75,8 +82,12 @@ wait_for_service "localhost" 5432 "Postgres"
 wait_for_service "localhost" 7687 "Neo4j"
 wait_for_service "localhost" 19530 "Milvus"
 
-echo "   ⏳ 서비스 준비 중... (20초 대기)"
-sleep 20
+echo "   ⏳ Reranker 모델 로딩 대기 중... (60초)"
+sleep 60
+wait_for_service "localhost" 8001 "Reranker"
+
+echo "   ⏳ 서비스 안정화 대기 중... (10초)"
+sleep 10
 
 # 4️⃣ 가상환경 및 라이브러리 설치
 echo -e "\n4️⃣ Python 가상환경 설정..."

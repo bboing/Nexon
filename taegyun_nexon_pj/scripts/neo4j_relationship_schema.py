@@ -42,6 +42,7 @@ class RelationshipRule:
     is_array: bool = False         # 배열인지 단일값인지
     nested_field: Optional[str] = None  # dict일 경우 추출할 하위 필드
     reverse: bool = False          # True면 target -> source 방향으로 관계 생성
+    bidirectional: bool = False    # True면 양방향 관계 생성 (source->target AND target->source)
     
     def extract_targets(self, detail_data: Dict[str, Any]) -> List[str]:
         """
@@ -105,7 +106,8 @@ class RelationshipSchema:
             target_category="MAP",
             relation_type=RelationType.CONNECTS_TO,
             is_array=True,
-            nested_field="target_map"  # dict일 경우 target_map 추출
+            nested_field="target_map",  # dict일 경우 target_map 추출
+            bidirectional=True  # 맵 연결은 양방향 (A→B 생성 시 B→A도 생성)
         ),
     ]
     
@@ -197,7 +199,8 @@ class RelationshipSchema:
                     "target_name": target_name,
                     "target_category": rule.target_category,
                     "relation_type": rule.relation_type.value,
-                    "reverse": rule.reverse
+                    "reverse": rule.reverse,
+                    "bidirectional": rule.bidirectional
                 })
         
         return relationships

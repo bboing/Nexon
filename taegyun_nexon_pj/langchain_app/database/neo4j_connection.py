@@ -142,21 +142,43 @@ class AsyncNeo4jConnection:
             logger.info("Neo4j Async 연결 종료")
             self._driver = None
     
+    async def _reconnect(self):
+        """드라이버 재연결 (이벤트 루프가 바뀌었을 때 사용)"""
+        try:
+            if self._driver:
+                await self._driver.close()
+        except Exception:
+            pass
+        self._driver = None
+        self._initialize_driver()
+        logger.info("✅ Neo4j Async 드라이버 재연결 완료")
+
     async def execute_query(self, query: str, parameters: dict = None):
         """
-        비동기 Cypher 쿼리 실행
-        
+        비동기 Cypher 쿼리 실행 (연결 끊김 시 자동 재연결)
+
         Args:
             query: Cypher 쿼리
             parameters: 쿼리 파라미터
-            
+
         Returns:
             쿼리 결과
         """
-        async with self.get_session() as session:
-            result = await session.run(query, parameters or {})
-            records = await result.data()
-            return records
+        try:
+            async with self.get_session() as session:
+                result = await session.run(query, parameters or {})
+                records = await result.data()
+                return records
+        except Exception as e:
+            # TCPTransport closed 등 연결 끊김 감지 → 재연결 후 재시도
+            if "closed" in str(e).lower() or "handler is closed" in str(e).lower():
+                logger.warning(f"Neo4j 연결 끊김 감지, 재연결 시도: {e}")
+                await self._reconnect()
+                async with self.get_session() as session:
+                    result = await session.run(query, parameters or {})
+                    records = await result.data()
+                    return records
+            raise
     
     async def execute_write(self, query: str, parameters: dict = None):
         """

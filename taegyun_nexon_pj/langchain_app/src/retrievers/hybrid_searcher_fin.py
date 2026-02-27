@@ -194,7 +194,9 @@ class HybridSearcherFin:
         async def empty(): return []            # sentence 값 없으면 [] return / 코루틴 객체 반환해야 함. 리스트 객체면 awaitable이 아님. asyncti.gather는 약속된
 
         pg_task = self._search_postgres_with_synonym(entities, limit_per_entity=5) if entities else empty()
-        milvus_task = self._search_milvus_sentences(sentences) if sentences and self.use_milvus else empty()
+        # ✅ Milvus: sentences가 없으면 전체 쿼리로 폴백 (LLM이 sentences를 못 뽑는 경우 대비)
+        milvus_queries = sentences if sentences else [query]
+        milvus_task = self._search_milvus_sentences(milvus_queries) if self.use_milvus else empty()
 
         pg_results, milvus_results = await asyncio.gather(pg_task, milvus_task)
         
@@ -220,11 +222,17 @@ class HybridSearcherFin:
             if self.verbose:
                 print(f"   🔗 Hop={hop} → Neo4j 관계 검색")
 
-            # ✅ SEP 개선: PG 결과에서 canonical_name 추출 → 원본 entity보다 정확한 Neo4j 쿼리
-            resolved_entities = self._extract_canonical_names(pg_results)
-            if self.verbose and resolved_entities:
-                print(f"   🔄 canonical_name 해소: {entities} → {resolved_entities}")
-            neo4j_entities = resolved_entities if resolved_entities else entities
+            # MAP-MAP 경로 쿼리: PG canonical_name 해소 건너뜀
+            # (PG 결과에 NPC 등 엉뚱한 이름이 섞여 find_path_between_maps 실패 방지)
+            # 그 외: PG canonical_name 해소로 동의어 정규화 (예: "얼음바지" → "아이스진")
+            relation_for_check = router_result.get("relation", "") if router_result else ""
+            if "MAP-MAP" in relation_for_check:
+                neo4j_entities = entities
+            else:
+                resolved_entities = self._extract_canonical_names(pg_results)
+                if self.verbose and resolved_entities:
+                    print(f"   🔄 canonical_name 해소: {entities} → {resolved_entities}")
+                neo4j_entities = resolved_entities if resolved_entities else entities
 
             neo4j_results = await self._search_neo4j_relations(query, neo4j_entities, router_result)
             results_by_source["Neo4j"] = neo4j_results
@@ -247,492 +255,17 @@ class HybridSearcherFin:
         
         if self.verbose:
             print(f"   📊 최종: {len(rrf_results[:limit])}개\n")
-        
-        return rrf_results[:limit]
-    
-    async def execute_plan(
-        self,
-        original_query: str,
-        router_result: Dict[str, Any],
-        limit: int = 5
-    ) -> List[Dict[str, Any]]:
-        """
-        Router의 Plan을 실제로 실행 (async/await 병렬 + 순차 하이브리드)
-        + RRF (Reciprocal Rank Fusion) 적용
-        
-        전략:
-        1. Plan을 배치로 그룹화
-           - SQL_DB, VECTOR_DB는 독립적 → 병렬 실행
-           - GRAPH_DB는 이전 결과 필요 → 새 배치 시작
-        2. 각 배치를 asyncio.gather로 병렬 실행
-        3. 배치 간에는 순차 실행 (의존성 보장)
-        4. RRF로 다중 소스 결과 융합
-        
-        Args:
-            original_query: 원본 질문
-            router_result: Router가 생성한 Plan
-            limit: 최대 결과 개수
-            
-        Returns:
-            검색 결과 리스트 (RRF 점수 순)
-        """
-        plan = router_result.get("plan", [])
-        
-        if not plan:
-            logger.warning("Plan이 비어있음, 기본 검색으로 폴백")
-            return await self._postgres_search(original_query, None, limit)
-        
-        if self.verbose:
-            print(f"\n   📋 Plan 실행 (병렬 최적화 + RRF):")
-        
-        # Plan을 배치로 그룹화
-        batches = self._group_plan_into_batches(plan)
-        
-        if self.verbose:
-            print(f"      배치: {len(batches)}개 (병렬 가능한 Step끼리 그룹화)")
-        
-        # 소스별 결과 수집 (RRF용)
-        results_by_source = {
-            "PostgreSQL": [],
-            "Neo4j": [],
-            "Milvus": []
+
+        # UI 표시용: 마지막 라우터 결과 저장
+        self.last_router_result = {
+            "entities": entities,
+            "sentences": sentences,
+            "hop": hop,
+            "relation": router_result.get("relation", "") if router_result else "",
         }
-        previous_batch_results = []
-        
-        # 각 배치 실행
-        for batch_idx, batch in enumerate(batches):
-            if self.verbose:
-                print(f"\n      === 배치 {batch_idx + 1}/{len(batches)} ({'병렬' if len(batch) > 1 else '순차'}) ===")
-            
-            # 배치 내 Step들을 병렬 실행
-            batch_results = await self._execute_batch_parallel(
-                batch, 
-                original_query, 
-                router_result, 
-                previous_batch_results
-            )
-            
-            # 소스별로 분류
-            for result in batch_results:
-                sources = result.get("sources", [])
-                for source in sources:
-                    if source in results_by_source:
-                        results_by_source[source].append(result)
-            
-            # 이 배치 결과를 다음 배치에 전달
-            previous_batch_results = batch_results
-        
-        # RRF 적용
-        rrf_results = self._apply_rrf(results_by_source)
-        
-        if self.verbose:
-            print(f"\n   ✅ RRF 완료: {len(rrf_results)}개 결과")
-        
-        # ✅ Reranker 적용 (RRF 후 노이즈 제거)
-        if len(rrf_results) > limit:
-            rrf_results = await self._rerank_with_jina(original_query, rrf_results, top_n=limit)
-            
-            if self.verbose:
-                print(f"   ✅ Reranker 완료: {len(rrf_results)}개 결과")
-        
-        if self.verbose:
-            print(f"\n   ✅ Plan 실행 완료: 총 {len(rrf_results)}개 결과")
-        
+
         return rrf_results[:limit]
     
-    def _group_plan_into_batches(self, plan: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-        """
-        Plan을 병렬 실행 가능한 배치로 그룹화
-        
-        규칙:
-        1. SQL_DB, VECTOR_DB는 독립적 → 같은 배치에 포함 가능
-        2. GRAPH_DB는 이전 결과 필요 → 새 배치 시작
-        
-        Args:
-            plan: Step 리스트
-            
-        Returns:
-            배치 리스트 (각 배치는 병렬 실행 가능한 Step들)
-        """
-        if not plan:
-            return []
-        
-        batches = []
-        current_batch = []
-        
-        for step in plan:
-            tool = step.get("tool", "")
-            
-            # GRAPH_DB는 이전 결과에 의존 → 배치 분리
-            if tool == "GRAPH_DB":
-                # 현재 배치가 있으면 먼저 추가
-                if current_batch:
-                    batches.append(current_batch)
-                    current_batch = []
-                # GRAPH_DB는 별도 배치
-                batches.append([step])
-            else:
-                # SQL_DB, VECTOR_DB는 같은 배치에 추가
-                current_batch.append(step)
-        
-        # 마지막 배치 추가
-        if current_batch:
-            batches.append(current_batch)
-        
-        return batches
-    
-    async def _execute_batch_parallel(
-        self,
-        batch: List[Dict[str, Any]],
-        original_query: str,
-        router_result: Dict[str, Any],
-        previous_results: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        배치 내 Step들을 병렬 실행 (async/await)
-        
-        Args:
-            batch: 병렬 실행할 Step 리스트
-            original_query: 원본 질문
-            router_result: Router 결과
-            previous_results: 이전 배치 결과
-            
-        Returns:
-            배치 실행 결과
-        """
-        batch_results = []
-        
-        # 단일 Step → 그냥 실행
-        if len(batch) == 1:
-            step = batch[0]
-            step_num = step.get("step", 0)
-            tool = step.get("tool", "")
-            reason = step.get("reason", "")
-            
-            if self.verbose:
-                print(f"      [{step_num}] {tool}: {reason}")
-            
-            results = await self._execute_single_step(step, original_query, router_result, previous_results)
-            
-            if self.verbose:
-                print(f"         → {len(results)}개 발견")
-            
-            return results
-        
-        # 다중 Step → async 병렬 실행
-        if self.verbose:
-            for step in batch:
-                print(f"      [{step.get('step', 0)}] {step.get('tool', '')}: {step.get('reason', '')}")
-        
-        # asyncio.gather로 병렬 실행
-        tasks = [
-            self._execute_single_step(step, original_query, router_result, previous_results)
-            for step in batch
-        ]
-        
-        try:
-            # 모든 태스크 병렬 실행
-            results_list = await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # 결과 수집
-            for idx, (step, results) in enumerate(zip(batch, results_list)):
-                if isinstance(results, Exception):
-                    logger.error(f"Step {step.get('step', 0)} 실행 실패: {results}")
-                else:
-                    batch_results.extend(results)
-                    
-                    if self.verbose:
-                        print(f"         [{step.get('step', 0)}] → {len(results)}개 발견")
-        
-        except Exception as e:
-            logger.error(f"배치 병렬 실행 실패: {e}")
-        
-        return batch_results
-    
-    async def _execute_single_step(
-        self,
-        step: Dict[str, Any],
-        original_query: str,
-        router_result: Dict[str, Any],
-        previous_results: List[Dict[str, Any]]
-    ) -> List[Dict[str, Any]]:
-        """
-        단일 Step 실행 (async)
-        
-        Args:
-            step: 실행할 Step
-            original_query: 원본 질문
-            router_result: Router 결과
-            previous_results: 이전 결과
-            
-        Returns:
-            Step 실행 결과
-        """
-        tool = step.get("tool", "")
-        query = step.get("query", "")
-        
-        try:
-            if tool == "SQL_DB":
-                return await self._execute_sql_db_step(original_query, query, router_result, step)
-                
-            elif tool == "GRAPH_DB":
-                # 이전 결과로 쿼리 조정
-                adjusted_query = self._adjust_graph_query(query, previous_results)
-                results = await self._execute_graph_db_step(original_query, adjusted_query, router_result)
-                # PostgreSQL로 보충
-                return await self._enrich_graph_results(results)
-                
-            elif tool == "VECTOR_DB":
-                return await self._execute_vector_db_step(original_query, query, router_result, step)
-            else:
-                logger.warning(f"알 수 없는 Tool: {tool}")
-                return []
-                
-        except Exception as e:
-            logger.error(f"Step 실행 실패: {e}")
-            return []
-    
-    def _adjust_graph_query(
-        self,
-        query: str,
-        previous_results: List[Dict[str, Any]]
-    ) -> str:
-        """
-        GRAPH_DB 쿼리를 이전 Step 결과로 조정
-        
-        Args:
-            query: 원본 쿼리 (예: "다크로드 → 위치 → MAP")
-            previous_results: 이전 Step의 검색 결과
-            
-        Returns:
-            조정된 쿼리
-        """
-        if not previous_results:
-            return query
-        
-        try:
-            # 이전 Step에서 찾은 첫 번째 엔티티 이름 추출
-            first_result = previous_results[0]
-            data = first_result.get("data", {})
-            canonical_name = data.get("canonical_name")
-            
-            if not canonical_name:
-                return query
-            
-            # 쿼리에서 첫 번째 단어(엔티티 이름)를 실제 찾은 이름으로 치환
-            # 예: "다크로드 → 위치 → MAP"
-            parts = query.split("→")
-            if len(parts) >= 2:
-                # 첫 번째 부분을 실제 찾은 엔티티로 교체
-                parts[0] = canonical_name
-                adjusted_query = " → ".join(parts)
-                
-                if self.verbose and adjusted_query != query:
-                    print(f"         쿼리 조정: {query} → {adjusted_query}")
-                
-                return adjusted_query
-            
-            return query
-            
-        except Exception as e:
-            logger.warning(f"쿼리 조정 실패: {e}")
-            return query
-    
-    async def _execute_sql_db_step(
-        self,
-        original_query: str,
-        step_query: str,
-        router_result: Dict[str, Any],
-        step: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        ✅ IMPROVED SQL_DB Step 실행 (PostgreSQL 검색 with Synonym)
-        
-        개선사항:
-        1. Router가 분리한 entities 사용 (우선)
-        2. Router 없으면 자체 키워드 추출 + N-gram 재구성 (fallback)
-        3. canonical_name 직접 매칭 + synonym 검색
-        
-        전략:
-        - Entity (명사) → PG canonical_name + synonym
-        - Sentence (동사구) → 무시 (VECTOR_DB Step에서 처리)
-        """
-        entities = []
-        
-        # 1. ✅ Router가 제공한 entities 우선 사용
-        if step and "entities" in step:
-            entities = step.get("entities", [])
-            
-            if self.verbose:
-                print(f"         Router entities: {entities}")
-        
-        # 2. Fallback: Router가 안 줬으면 자체 추출
-        if not entities:
-            raw_keywords = await self._extract_keywords(original_query)
-            
-            if self.verbose:
-                print(f"         자체 추출 키워드: {raw_keywords}")
-            
-            # N-gram 재구성 (Entity vs Sentence 분류)
-            structured = self._reconstruct_ngrams(raw_keywords, original_query)
-            entities = structured["entities"]
-            
-            if self.verbose:
-                print(f"         Fallback entities: {entities}")
-        
-        if not entities:
-            # Entity가 없으면 빈 결과 반환 (Sentence는 VECTOR_DB에서 처리)
-            if self.verbose:
-                print(f"         ⚠️ Entity 없음, PostgreSQL 검색 생략")
-            return []
-        
-        # 3. ✅ Entity → PostgreSQL 검색 (canonical_name + synonym)
-        results = await self._search_postgres_with_synonym(
-            entities,
-            limit_per_entity=5
-        )
-        
-        if self.verbose:
-            print(f"         PostgreSQL: {len(results)}개 결과")
-        
-        return results
-    
-    async def _execute_graph_db_step(
-        self,
-        original_query: str,
-        step_query: str,
-        router_result: Dict[str, Any]
-    ) -> List[Dict[str, Any]]:
-        """
-        GRAPH_DB Step 실행 (Neo4j 관계 검색, async)
-        
-        step_query 분석:
-        - "NPC → MAP" → NPC 위치 찾기
-        - "MONSTER → MAP" → 몬스터 출현 위치
-        - "ITEM → NPC" → 아이템 판매 NPC
-        - "ITEM → MONSTER" → 아이템 드랍 몬스터
-        - "MAP → MAP" → 맵 연결
-        """
-        if not self.use_neo4j or not self.neo4j_searcher:
-            logger.info("Neo4j 검색 비활성화")
-            return []
-        
-        # step_query에서 관계 유형 추출
-        step_query_lower = step_query.lower()
-        
-        # step_query에서 엔티티 이름 추출 (예: "다크로드 → 위치 → MAP")
-        entity_name = None
-        if "→" in step_query:
-            parts = step_query.split("→")
-            entity_name = parts[0].strip()
-            
-            # 카테고리 접두사 제거 (MAP, MONSTER, NPC, ITEM 등)
-            category_prefixes = ["MAP ", "MONSTER ", "NPC ", "ITEM "]
-            for prefix in category_prefixes:
-                if entity_name.startswith(prefix):
-                    entity_name = entity_name[len(prefix):].strip()
-                    break
-        
-        # 키워드로 엔티티 이름 추출 (fallback)
-        keywords = await self._extract_keywords(original_query)
-        
-        # step_query에서 추출한 엔티티가 있으면 우선 사용 (중복 제거)
-        if entity_name:
-            if entity_name not in keywords:
-                keywords = [entity_name] + keywords
-            else:
-                # 이미 있으면 앞으로 이동
-                keywords.remove(entity_name)
-                keywords = [entity_name] + keywords
-        
-        if self.verbose:
-            print(f"         GRAPH_DB step_query: {step_query}")
-            print(f"         Keywords: {keywords}")
-        
-        results = []
-        
-        # NPC 관련 검색
-        if "npc" in step_query_lower and "map" in step_query_lower:
-            # Case 1: NPC 위치 검색 ("NPC가 어디에 있는지")
-            if any(word in step_query_lower for word in ["위치", "어디", "있는지"]) and \
-               any(word in original_query for word in ["어디", "위치"]):
-                for keyword in keywords:
-                    npc_results = await self.neo4j_searcher.find_npc_location(keyword)
-                    results.extend(self._format_graph_results(npc_results, "graph_npc_location"))
-            
-            # Case 2: MAP → NPC ("맵에 어떤 NPC가 있는지")
-            else:
-                # PostgreSQL에서 MAP 검색 후 resident_npcs 활용
-                for keyword in keywords:
-                    if keyword not in ["MAP", "NPC", "MONSTER", "ITEM"] and len(keyword) >= 2:
-                        try:
-                            pg_results = await self.pg_searcher.search(keyword, category="MAP", limit=3)
-                            # sources 필드 추가
-                            for result in pg_results:
-                                if "sources" not in result:
-                                    result["sources"] = ["PostgreSQL"]
-                            results.extend(pg_results)
-                        except Exception as e:
-                            logger.warning(f"MAP NPC 검색 실패 ({keyword}): {e}")
-        
-        # 몬스터 위치 검색
-        elif "monster" in step_query_lower and "map" in step_query_lower:
-            for keyword in keywords:
-                monster_results = await self.neo4j_searcher.find_monster_locations(keyword)
-                results.extend(self._format_graph_results(monster_results, "graph_monster_location"))
-        
-        # 아이템 판매 NPC 검색
-        elif "item" in step_query_lower and "npc" in step_query_lower:
-            # "판매" 또는 "sell" 키워드
-            if any(word in step_query_lower for word in ["판매", "sell", "구매", "buy", "사"]):
-                for keyword in keywords:
-                    seller_results = await self.neo4j_searcher.find_item_sellers(keyword)
-                    results.extend(self._format_graph_results(seller_results, "graph_item_seller"))
-        
-        # 아이템 드랍 몬스터 검색
-        elif any(word in step_query_lower for word in ["드랍", "drop", "떨어", "나와", "나오"]):
-            # "드랍", "몬스터" 키워드가 있으면 드랍 검색
-            if "몬스터" in step_query_lower or "monster" in step_query_lower:
-                for keyword in keywords:
-                    dropper_results = await self.neo4j_searcher.find_item_droppers(keyword)
-                    results.extend(self._format_graph_results(dropper_results, "graph_item_dropper"))
-        
-        # 맵 연결 검색
-        elif "map" in step_query_lower and any(word in step_query_lower for word in ["경로", "connect", "이동", "가는"]):
-            for keyword in keywords:
-                map_results = await self.neo4j_searcher.find_map_connections(keyword)
-                results.extend(self._format_graph_results(map_results, "graph_map_connection"))
-        
-        # ✅ MAP 검색 (resident_npcs, resident_monsters는 PostgreSQL에 있음)
-        # "MAP → 커닝시티", "커닝시티에 어떤 NPC" 등
-        else:
-            # keywords에 맵 이름이 있으면 PostgreSQL 직접 검색
-            for keyword in keywords:
-                if keyword not in ["MAP", "NPC", "MONSTER", "ITEM"] and len(keyword) >= 2:
-                    try:
-                        # MAP 우선 검색
-                        if "map" in step_query_lower or "맵" in step_query_lower or \
-                           any(word in original_query for word in ["어떤", "있어", "주민"]):
-                            pg_results = await self.pg_searcher.search(keyword, category="MAP", limit=3)
-                            # sources 필드 추가
-                            for result in pg_results:
-                                if "sources" not in result:
-                                    result["sources"] = ["PostgreSQL"]
-                            results.extend(pg_results)
-                        
-                        # 결과 없으면 전체 카테고리 검색
-                        if not results:
-                            pg_results = await self.pg_searcher.search(keyword, category=None, limit=3)
-                            # sources 필드 추가
-                            for result in pg_results:
-                                if "sources" not in result:
-                                    result["sources"] = ["PostgreSQL"]
-                            results.extend(pg_results)
-                            
-                    except Exception as e:
-                        logger.warning(f"검색 실패 ({keyword}): {e}")
-        
-        return results
     
     def _format_graph_results(
         self,
@@ -829,85 +362,6 @@ class HybridSearcherFin:
                 enriched.append(result)
         
         return enriched
-    
-    async def _execute_vector_db_step(
-        self,
-        original_query: str,
-        step_query: str,
-        router_result: Dict[str, Any],
-        step: Optional[Dict[str, Any]] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        ✅ IMPROVED VECTOR_DB Step 실행 (Milvus 의미 검색)
-        
-        개선사항:
-        1. Router가 분리한 sentences 사용 (우선)
-        2. Router 없으면 자체 키워드 추출 + N-gram 재구성 (fallback)
-        3. 의미 기반 검색으로 간접 표현 처리
-        
-        전략:
-        - Sentence (동사구) → Milvus 의미 검색 ✅
-        - Entity (명사) → 무시 (SQL_DB Step에서 처리)
-        
-        예시:
-        - "물약 파는 사람" → Milvus → "미나" (포션 상인)
-        """
-        if not self.use_milvus or not self.milvus_searcher:
-            return []
-        
-        try:
-            sentences = []
-            
-            # 1. ✅ Router가 제공한 sentences 우선 사용
-            if step and "sentences" in step:
-                sentences = step.get("sentences", [])
-                
-                if self.verbose:
-                    print(f"         Router sentences: {sentences}")
-            
-            # 2. Fallback: Router가 안 줬으면 자체 추출
-            if not sentences:
-                raw_keywords = await self._extract_keywords(original_query)
-                
-                if self.verbose:
-                    print(f"         자체 추출 키워드: {raw_keywords}")
-                
-                # N-gram 재구성 (Entity vs Sentence 분류)
-                structured = self._reconstruct_ngrams(raw_keywords, original_query)
-                sentences = structured["sentences"]
-                
-                if self.verbose:
-                    print(f"         Fallback sentences: {sentences}")
-            
-            # 3. Sentence가 없으면 원본 질문으로 검색 (Fallback)
-            search_queries = sentences if sentences else [original_query]
-            
-            if self.verbose:
-                print(f"         Milvus 검색 쿼리: {search_queries}")
-            
-            # 4. ✅ Sentence → Milvus 의미 검색
-            all_results = []
-            for query in search_queries:
-                results = await self.milvus_searcher.search(query, top_k=5)
-                
-                # 결과 포맷팅
-                for result in results:
-                    all_results.append({
-                        "score": result.get("score", 0) * 100,
-                        "match_type": "vector_semantic",
-                        "sources": ["Milvus"],
-                        "data": result,
-                        "search_query": query  # 어떤 쿼리로 찾았는지 보존
-                    })
-            
-            if self.verbose:
-                print(f"         Milvus: {len(all_results)}개 결과")
-            
-            return all_results
-            
-        except Exception as e:
-            logger.error(f"VECTOR_DB 검색 실패: {e}")
-            return []
     
     async def _extract_keywords(self, query: str) -> List[str]:
         """
@@ -1280,6 +734,10 @@ class HybridSearcherFin:
                 # 누적
                 if entity_id in rrf_scores:
                     rrf_scores[entity_id] += rrf_score
+                    # sources 누적 (중복 제거)
+                    for s in result.get("sources", []):
+                        if s not in entity_data[entity_id]["sources"]:
+                            entity_data[entity_id]["sources"].append(s)
                 else:
                     rrf_scores[entity_id] = rrf_score
                     entity_data[entity_id] = result
@@ -1469,36 +927,74 @@ class HybridSearcherFin:
         
         results = []
         relation = router_result.get("relation", "") if router_result else ""
-        
+
+        # ✅ 특수 케이스: MAP→MAP 최단 경로 탐색 (출발지 → 목적지)
+        # find_map_connections는 직접 연결만 반환하므로 멀티 hop 경로는 find_path_between_maps 사용
+        # query 기반 fallback: relation에 MAP-MAP이 없어도 query 패턴으로 감지
+        _map_path_query = "에서" in query and any(
+            w in query for w in ["까지", "가려면", "이동", "가는 법", "어떻게 가"]
+        )
+        if ("MAP-MAP" in relation or _map_path_query) and len(entities) >= 2:
+            try:
+                path_results = await self.neo4j_searcher.find_path_between_maps(entities[0], entities[1])
+                if path_results:
+                    for pr in path_results:
+                        path_str = " → ".join(pr.get("path", []))
+                        results.append({
+                            "score": 90.0,
+                            "match_type": "graph_map_path",
+                            "sources": ["Neo4j"],
+                            "data": {
+                                "id": f"path_{entities[0]}_{entities[1]}",
+                                "canonical_name": f"{entities[0]} → {entities[1]}",
+                                "category": "MAP",
+                                "description": f"이동 경로: {path_str} (총 {pr.get('distance', 0)}단계)",
+                                "relation_info": pr
+                            }
+                        })
+                    return results  # 경로 결과로 바로 반환 (enrichment 불필요)
+            except Exception as e:
+                logger.warning(f"Neo4j 경로 탐색 실패 ({entities[0]} → {entities[1]}): {e}")
+                # 실패 시 아래 entity 루프로 fallback
+
         # Entity 기반으로 관계 검색
         for entity in entities:
             try:
                 # 관계 유형에 따라 적절한 Neo4j 메서드 호출
-                if "MONSTER-MAP" in relation or "어디" in query:
-                    # 몬스터 위치
+                # ✅ "ITEM-MONSTER-MAP"을 먼저 체크 (MONSTER-MAP이 substring으로 포함되므로 순서 중요)
+                if "ITEM-MONSTER-MAP" in relation or (
+                    ("드랍" in query or "떨구" in query or "나오는" in query) and
+                    ("어디" in query or "서식" in query or "잡아" in query)
+                ):
+                    # 2-hop: ITEM → MONSTER(드랍처) → MAP(서식지)
+                    two_hop_results = await self.neo4j_searcher.find_item_droppers_with_location(entity)
+                    results.extend(self._format_graph_results(two_hop_results, "graph_item_monster_map"))
+
+                elif "MONSTER-MAP" in relation or ("어디" in query and "몬스터" in query):
+                    # 1-hop: MONSTER → MAP 위치
                     monster_results = await self.neo4j_searcher.find_monster_locations(entity)
                     results.extend(self._format_graph_results(monster_results, "graph_monster_location"))
-                
+
                 elif "NPC-MAP" in relation or "QUEST-NPC-MAP" in relation:
                     # NPC 위치
                     npc_results = await self.neo4j_searcher.find_npc_location(entity)
                     results.extend(self._format_graph_results(npc_results, "graph_npc_location"))
-                
+
                 elif "ITEM-MONSTER" in relation or "드랍" in query or "얻" in query:
-                    # 아이템 드랍 몬스터
+                    # 아이템 드랍 몬스터 (위치 불필요)
                     dropper_results = await self.neo4j_searcher.find_item_droppers(entity)
                     results.extend(self._format_graph_results(dropper_results, "graph_item_dropper"))
-                
+
                 elif "ITEM-NPC" in relation or "파는" in query or "구매" in query:
                     # 아이템 판매 NPC
                     seller_results = await self.neo4j_searcher.find_item_sellers(entity)
                     results.extend(self._format_graph_results(seller_results, "graph_item_seller"))
-                
+
                 elif "MAP-MAP" in relation or "가는" in query:
                     # 맵 연결
                     map_results = await self.neo4j_searcher.find_map_connections(entity)
                     results.extend(self._format_graph_results(map_results, "graph_map_connection"))
-                    
+
             except Exception as e:
                 logger.warning(f"Neo4j 관계 검색 실패 ({entity}): {e}")
         

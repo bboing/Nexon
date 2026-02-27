@@ -185,6 +185,25 @@ services:
   # Layer 3: Application (로컬 개발용)
   # ============================================================
 
+  # Jina Reranker - 로컬 재랭킹 서버 (MPS/CUDA/CPU 자동 선택)
+  reranker:
+    build:
+      context: .
+      dockerfile: ./langchain_app/Dockerfile
+    container_name: ai-reranker
+    command: ["python", "api/reranker_jina.py"]
+    ports:
+      - "8001:8001"
+    networks:
+      - ai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/docs"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s  # 모델 로딩 시간 고려
+
   # LangChain API - FastAPI 애플리케이션
   # Ollama는 호스트 macOS에서 실행 (http://host.docker.internal:11434)
   langchain-api:
@@ -192,10 +211,12 @@ services:
       context: .
       dockerfile: ./langchain_app/Dockerfile
     container_name: ai-langchain-api
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # Linux 호환 (Mac/Windows는 자동 지원)
     env_file:
       - .env
     environment:
-      # Ollama 연결 (호스트 macOS)
+      # Ollama 연결 (호스트에서 실행 중인 Ollama)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
       - OLLAMA_MODEL=${OLLAMA_MODEL:-llama3.1:8b}
       
@@ -232,6 +253,9 @@ services:
       - API_PORT=8000
       - API_WORKERS=${API_WORKERS:-4}
       - LOG_LEVEL=${LOG_LEVEL:-info}
+
+      # Reranker (Docker 내부 서비스)
+      - RERANKER_API_URL=http://reranker:8001/rerank
     ports:
       - "${LANGCHAIN_API_PORT:-8000}:8000"
     volumes:
@@ -248,6 +272,8 @@ services:
       milvus:
         condition: service_healthy
       neo4j:
+        condition: service_healthy
+      reranker:
         condition: service_healthy
     networks:
       - ai-network
@@ -297,7 +323,10 @@ services:
       # Groq API (Answer Generator + Router 모두 사용)
       - GROQ_API_KEY=${GROQ_API_KEY}
       - GROQ_MODEL_NAME=${GROQ_MODEL_NAME}
-      
+
+      # Reranker (Docker 내부 서비스)
+      - RERANKER_API_URL=http://reranker:8001/rerank
+
       # Streamlit 설정
       - STREAMLIT_SERVER_PORT=8501
       - STREAMLIT_SERVER_ADDRESS=0.0.0.0
@@ -315,6 +344,8 @@ services:
       neo4j:
         condition: service_healthy
       milvus:
+        condition: service_healthy
+      reranker:
         condition: service_healthy
     networks:
       - ai-network

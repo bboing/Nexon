@@ -42,14 +42,21 @@ echo -e "\n1️⃣ 시스템 환경 확인 중..."
 if ! command -v python3 &> /dev/null; then echo "❌ Python3 미설치"; exit 1; fi
 if ! command -v docker &> /dev/null; then echo "❌ Docker 미설치"; exit 1; fi
 
-# Docker 실행 여부 확인 및 Mac 자동 실행
+# Docker 실행 여부 확인
 if ! docker info &> /dev/null; then
     if [[ "$OSTYPE" == "darwin"* ]]; then
-        echo "   🐳 Docker Desktop 실행 중..."
+        echo "   🐳 Docker Desktop 실행 중... (macOS)"
         open -a Docker
         sleep 20
+    elif [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        echo "   ❌ Docker가 실행 중이지 않습니다. (Linux)"
+        echo "   👉 아래 명령어로 Docker를 시작하세요:"
+        echo "      sudo systemctl start docker"
+        exit 1
     else
-        echo "   ❌ Docker가 실행 중이지 않습니다."; exit 1
+        echo "   ❌ Docker가 실행 중이지 않습니다."
+        echo "   👉 Windows 사용자: Docker Desktop을 먼저 실행하고 WSL2 터미널에서 재시도하세요."
+        exit 1
     fi
 fi
 echo "   ✅ Python & Docker 준비 완료"
@@ -79,39 +86,23 @@ if ! grep -q "^GROQ_API_KEY=gsk_" "${ROOT_DIR}/.env" 2>/dev/null; then
     fi
 fi
 
-# 3️⃣ Docker Volume 사전 생성 (external: true 볼륨은 미리 존재해야 함)
-echo -e "\n3️⃣ Docker Volume 사전 생성..."
-VOLUMES=(
-    "taegyun_nexon_pj_biz-postgres-data"
-    "taegyun_nexon_pj_redis-data"
-    "taegyun_nexon_pj_neo4j-data"
-    "taegyun_nexon_pj_neo4j-logs"
-    "taegyun_nexon_pj_etcd-data"
-    "taegyun_nexon_pj_minio-milvus-data"
-    "taegyun_nexon_pj_milvus-data"
-)
-for VOL in "${VOLUMES[@]}"; do
-    if ! docker volume inspect "$VOL" > /dev/null 2>&1; then
-        docker volume create "$VOL"
-        echo "   ✅ 볼륨 생성: $VOL"
-    else
-        echo "   ♻️  볼륨 이미 존재: $VOL"
-    fi
-done
-
-# 4️⃣ 인프라 가동 (Docker Compose - Portfolio Mode)
-echo -e "\n4️⃣ Docker 컨테이너 가동 (Portfolio Mode)..."
+# 3️⃣ 인프라 가동 (Docker Compose - Portfolio Mode)
+echo -e "\n3️⃣ Docker 컨테이너 가동 (Portfolio Mode)..."
 docker-compose -f "${ROOT_DIR}/docker-compose.prod.yml" up -d --build
 
 wait_for_service "localhost" 5432 "Postgres"
 wait_for_service "localhost" 7687 "Neo4j"
 wait_for_service "localhost" 19530 "Milvus"
 
-echo "   ⏳ 서비스 준비 중... (20초 대기)"
-sleep 20
+echo "   ⏳ Reranker 모델 로딩 대기 중... (60초)"
+sleep 60
+wait_for_service "localhost" 8001 "Reranker"
 
-# 5️⃣ 가상환경 및 라이브러리 설치
-echo -e "\n5️⃣ Python 가상환경 설정..."
+echo "   ⏳ 서비스 안정화 대기 중... (10초)"
+sleep 10
+
+# 4️⃣ 가상환경 및 라이브러리 설치
+echo -e "\n4️⃣ Python 가상환경 설정..."
 if [ ! -d "${ROOT_DIR}/nexon_venv" ]; then
     python3 -m venv "${ROOT_DIR}/nexon_venv"
 fi
@@ -122,8 +113,8 @@ pip install --upgrade pip > /dev/null
 # 통합 requirements.txt 사용 (langchain_app + streamlit_app + scripts 전체 포함)
 pip install -r "${ROOT_DIR}/requirements.txt" > /dev/null
 
-# 6️⃣ 데이터베이스 초기화 및 시딩 (중요 순서!)
-echo -e "\n6️⃣ 데이터 지식 구조화 시작..."
+# 5️⃣ 데이터베이스 초기화 및 시딩 (중요 순서!)
+echo -e "\n5️⃣ 데이터 지식 구조화 시작..."
 
 echo "   [1/3] Postgres 데이터 임포트..."
 echo "ROOT_DIR : ${ROOT_DIR}"

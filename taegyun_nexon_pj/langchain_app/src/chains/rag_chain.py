@@ -6,13 +6,13 @@ RAG Chain - 검색(Retriever) + 생성(Generator) 파이프라인 오케스트�
   main.py는 체인만 호출하면 되고, 내부 조합 로직은 여기서 관리한다.
 
 파이프라인:
-  query → HybridSearcherHop(검색) → AnswerGenerator(생성) → result
+  query → HybridSearcherFin(검색) → AnswerGenerator(생성) → result
 """
 from typing import Any, Dict, List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
-from src.retrievers.hybrid_searcher_hop import HybridSearcher as HybridSearcherHop
+from src.retrievers.hybrid_searcher_fin import HybridSearcher as HybridSearcherFin
 from src.generators.answer_generator import AnswerGenerator
 
 logger = logging.getLogger(__name__)
@@ -23,7 +23,7 @@ class MapleRAGChain:
     메이플스토리 RAG 파이프라인
 
     컴포넌트:
-    - HybridSearcherHop : HOP 기반 하이브리드 검색 (PG + Milvus + Neo4j)
+    - HybridSearcherFin : hop 기반 하이브리드 검색 (PG + Milvus + Neo4j)
     - AnswerGenerator   : 검색 결과 → LLM 자연어 답변 생성
 
     사용법:
@@ -38,7 +38,7 @@ class MapleRAGChain:
         use_neo4j: bool = True,
         verbose: bool = False,
     ):
-        self.searcher = HybridSearcherHop(
+        self.searcher = HybridSearcherFin(
             db=db,
             use_milvus=use_milvus,
             use_neo4j=use_neo4j,

@@ -106,7 +106,7 @@ class Neo4jSearcher:
         RETURN monster.name as monster_name, item.name as item_name,
                monster.id as monster_id, item.id as item_id
         """
-        
+
         try:
             results = await self.conn.execute_query(query, {"item_name": item_name})
             return [
@@ -121,6 +121,39 @@ class Neo4jSearcher:
             ]
         except Exception as e:
             logger.error(f"Neo4j 아이템 드랍처 검색 실패: {e}")
+            return []
+
+    async def find_item_droppers_with_location(self, item_name: str) -> List[Dict[str, Any]]:
+        """아이템을 드랍하는 몬스터 + 그 몬스터의 서식지(맵)까지 2-hop 검색
+
+        ITEM → MONSTER → MAP 체인 관계
+        예: "얼음바지" → "스포아" → "리스항구 해변"
+        """
+        query = """
+        MATCH (monster:MONSTER)-[:DROPS]->(item:ITEM)
+        WHERE item.name CONTAINS $item_name
+        OPTIONAL MATCH (monster)-[:SPAWNS_IN]->(map:MAP)
+        RETURN monster.name as monster_name, item.name as item_name,
+               map.name as map_name,
+               monster.id as monster_id, item.id as item_id, map.id as map_id
+        """
+
+        try:
+            results = await self.conn.execute_query(query, {"item_name": item_name})
+            return [
+                {
+                    "monster_name": record["monster_name"],
+                    "item_name": record["item_name"],
+                    "map_name": record["map_name"],
+                    "monster_id": record["monster_id"],
+                    "item_id": record["item_id"],
+                    "map_id": record["map_id"],
+                    "relation_type": "DROPS+SPAWNS_IN"
+                }
+                for record in results
+            ]
+        except Exception as e:
+            logger.error(f"Neo4j 아이템→몬스터→맵 2-hop 검색 실패: {e}")
             return []
     
     async def find_map_connections(self, map_name: str) -> List[Dict[str, Any]]:
@@ -207,9 +240,9 @@ class Neo4jSearcher:
         """두 맵 사이의 최단 경로 찾기"""
         query = """
         MATCH path = shortestPath(
-            (start:MAP)-[:CONNECTS_TO*..5]->(end:MAP)
+            (start:MAP)-[:CONNECTS_TO*..5]-(end:MAP)
         )
-        WHERE start.name CONTAINS $start_map 
+        WHERE start.name CONTAINS $start_map
           AND end.name CONTAINS $end_map
         RETURN [node in nodes(path) | node.name] as path_names,
                length(path) as distance

@@ -158,15 +158,21 @@ Intent에 따른 Category:
 - MAP: "커닝시티에 대해서 설명해줘"
 - NPC ↔ MAP: "다크로드 어디 있어?"
 - MONSTER ↔ MAP: "스포아 어디 나와?"
-- ITEM ↔ MONSTER: "아이스진 드랍하는 몬스터는?"
+- ITEM ↔ MONSTER: "아이스진 드랍하는 몬스터는?" (몬스터 이름만 묻는 경우)
 - ITEM ↔ NPC: "아이스진 파는 곳은?"
 → 직접 관계, Neo4j 불필요
 
 **2-hop 관계** (Neo4j 필요):
 - ITEM → MONSTER → MAP: "아이스진 얻으려면 어떻게 하나요?"
+- ITEM → MONSTER → MAP: "얼음바지 드랍하는 몬스터는 어디에 서식하고 있어?" ← 몬스터 이름 + 위치까지 물어보는 경우
+- ITEM → MONSTER → MAP: "아이스진 드랍하는 몬스터 어디서 잡아?"
 - QUEST → NPC → MAP: "도적 전직하려면 어디로 가야되나요?"
 - MAP → MAP → ...: "헤네시스에서 엘리니아 가는 법?"
 → 체인 관계, Neo4j 필수
+
+**⚠️ 핵심 구분 원칙**:
+- "드랍하는 몬스터는?" → 1-hop (몬스터 이름만 필요)
+- "드랍하는 몬스터는 어디 있어/서식해/잡아?" → 2-hop (몬스터 위치까지 필요 = MONSTER→MAP 추가)
 
 [전략 수립 원칙]
 
@@ -196,10 +202,11 @@ Intent에 따른 Category:
   "sentences": ["문장1"]                // 동사구 (예: ["물약 파는 사람"])
 }
 
-**중요**: 
+**중요**:
 - hop=1: 직접 관계 (NPC-MAP, ITEM-MONSTER 등)
 - hop=2: 체인 관계 (ITEM-MONSTER-MAP, QUEST-NPC-MAP 등)
-- entities: 명사만 추출
+- entities: 명사만 추출. **반드시 조사(에서, 로, 을, 를, 이, 가, 은, 는, 까지) 제거 후 순수 명사만** (예: "헤네시스에서" → "헤네시스", "엘리니아로" → "엘리니아")
+- MAP→MAP 경로 질문은 출발지와 목적지를 **반드시 둘 다** entities에 포함 (예: ["헤네시스", "엘리니아"])
 - sentences: 동사구만 추출
 
 [예시]
@@ -255,6 +262,42 @@ Intent에 따른 Category:
   "hop": 2,
   "relation": "ITEM-MONSTER-MAP",
   "entities": ["아이스진"],
+  "sentences": []
+}
+
+질문: "얼음바지 드랍하는 몬스터는 어디에 서식하고 있어?"
+{
+  "thought": "얼음바지를 드랍하는 몬스터 이름 + 그 몬스터의 서식지(맵)까지 알아야 함. ITEM→MONSTER→MAP 체인 관계 (2-hop)",
+  "hop": 2,
+  "relation": "ITEM-MONSTER-MAP",
+  "entities": ["얼음바지"],
+  "sentences": []
+}
+
+질문: "아이스진 드랍하는 몬스터는?"
+{
+  "thought": "아이스진을 드랍하는 몬스터 이름만 물어봄. ITEM→MONSTER 직접 관계 (1-hop). 위치는 묻지 않음",
+  "hop": 1,
+  "relation": "ITEM-MONSTER",
+  "entities": ["아이스진"],
+  "sentences": []
+}
+
+질문: "헤네시스에서 엘리니아로 가려면 어떻게 가야해요?"
+{
+  "thought": "헤네시스(출발)에서 엘리니아(목적지)까지 이동 경로 탐색. MAP→MAP 경로 관계 (2-hop)",
+  "hop": 2,
+  "relation": "MAP-MAP",
+  "entities": ["헤네시스", "엘리니아"],
+  "sentences": []
+}
+
+질문: "커닝시티에서 페리온까지 가는 법"
+{
+  "thought": "커닝시티(출발)에서 페리온(목적지)까지 이동 경로. MAP→MAP 경로 관계 (2-hop)",
+  "hop": 2,
+  "relation": "MAP-MAP",
+  "entities": ["커닝시티", "페리온"],
   "sentences": []
 }
 
@@ -492,7 +535,30 @@ Intent에 따른 Category:
         relation = plan_result.get("relation", "")
         entities = plan_result.get("entities", [])
         sentences = plan_result.get("sentences", [])
-        
+
+        # ✅ 규칙 기반 hop 보정 (LLM 판단 오류 방지)
+        query_lower_for_hop = query.lower()
+
+        # 패턴 1: ITEM→MONSTER→MAP ("드랍/나오는" + "어디/서식/잡아")
+        drop_trigger = ["드랍", "떨구", "나오는", "나와", "얻으려"]
+        location_trigger = ["어디", "서식", "잡아", "잡을", "위치"]
+        if hop == 1 and (
+            any(w in query_lower_for_hop for w in drop_trigger) and
+            any(w in query_lower_for_hop for w in location_trigger)
+        ):
+            hop = 2
+            relation = "ITEM-MONSTER-MAP"
+            logger.info(f"✅ hop 보정: 1 → 2 (드랍+위치 패턴) query='{query}'")
+
+        # 패턴 2: MAP→MAP 경로 ("에서" + "까지/가려면/이동/가는 법")
+        # hop==1 조건 제거: LLM이 hop=2를 반환해도 relation이 MAP-MAP이 아닐 수 있음
+        elif "에서" in query_lower_for_hop and any(
+            w in query_lower_for_hop for w in ["까지", "가려면", "이동", "가는 법", "어떻게 가"]
+        ) and "MAP-MAP" not in relation:
+            hop = 2
+            relation = "MAP-MAP"
+            logger.info(f"✅ hop 보정: → 2 (MAP 경로 패턴) query='{query}'")
+
         # hop 기반 strategy 결정
         if hop >= 2:
             strategy = SearchStrategy.RELATION  # Neo4j 필요

@@ -151,11 +151,12 @@ class Neo4jSyncer:
             target_category = rel["target_category"]
             relation_type = rel["relation_type"]
             reverse = rel.get("reverse", False)
-            
+            bidirectional = rel.get("bidirectional", False)
+
             # 노드 존재 확인
             if not self.resolver.exists(target_name, target_category):
                 continue  # 노드 없으면 스킵
-            
+
             # 역방향 관계 처리
             if reverse:
                 # target -> source 방향
@@ -176,7 +177,18 @@ class Neo4jSyncer:
                     target_category=target_category,
                     relation_type=relation_type
                 )
-            
+
+                # 양방향이면 역방향도 추가 생성
+                if created and bidirectional and self.resolver.exists(entity.canonical_name, category):
+                    self._create_relationship(
+                        source_id=None,
+                        source_category=target_category,
+                        target_name=entity.canonical_name,
+                        target_category=category,
+                        relation_type=relation_type,
+                        source_name=target_name  # target → source (역방향)
+                    )
+
             if created:
                 count += 1
         
